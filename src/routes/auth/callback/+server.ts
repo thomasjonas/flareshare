@@ -53,5 +53,8 @@ export const GET: RequestHandler = async ({ url, cookies, platform }) => {
 		maxAge: 60 * 60 * 24 * 30
 	});
 
-	return Response.redirect(`${url.origin}/upload`, 302);
+	return new Response(null, {
+		status: 302,
+		headers: { Location: `${url.origin}/upload` }
+	});
 };

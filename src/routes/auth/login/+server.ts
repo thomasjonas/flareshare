@@ -17,5 +17,8 @@ export const GET: RequestHandler = async ({ cookies, platform, url }) => {
 		state
 	});
 
-	return Response.redirect(`https://github.com/login/oauth/authorize?${params}`, 302);
+	return new Response(null, {
+		status: 302,
+		headers: { Location: `https://github.com/login/oauth/authorize?${params}` }
+	});
 };
