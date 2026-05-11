@@ -26,21 +26,16 @@ export async function presignPut(
 	key: string,
 	contentLength: number,
 	contentType: string,
-	expiresSeconds = 900
+	expiresSeconds = 300
 ): Promise<string> {
 	const url = new URL(objectUrl(env, key));
 	url.searchParams.set('X-Amz-Expires', String(expiresSeconds));
 
 	const req = new Request(url, {
 		method: 'PUT',
-		headers: {
-			'content-length': String(contentLength),
-			'content-type': contentType
-		}
+		headers: { 'content-type': contentType }
 	});
-	// allHeaders: true ensures content-length lands in X-Amz-SignedHeaders,
-	// binding the exact file size into the signature.
-	const signed = await client.sign(req, { aws: { signQuery: true, allHeaders: true } });
+	const signed = await client.sign(req, { aws: { signQuery: true } });
 	return signed.url;
 }
 
@@ -50,7 +45,6 @@ export async function presignUploadPart(
 	key: string,
 	uploadId: string,
 	partNumber: number,
-	contentLength: number,
 	expiresSeconds = 3600
 ): Promise<string> {
 	const url = new URL(objectUrl(env, key));
@@ -58,11 +52,8 @@ export async function presignUploadPart(
 	url.searchParams.set('uploadId', uploadId);
 	url.searchParams.set('X-Amz-Expires', String(expiresSeconds));
 
-	const req = new Request(url, {
-		method: 'PUT',
-		headers: { 'content-length': String(contentLength) }
-	});
-	const signed = await client.sign(req, { aws: { signQuery: true, allHeaders: true } });
+	const req = new Request(url, { method: 'PUT' });
+	const signed = await client.sign(req, { aws: { signQuery: true } });
 	return signed.url;
 }
 

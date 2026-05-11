@@ -24,7 +24,7 @@ export const POST: RequestHandler = async ({ request, platform, url }) => {
 	const key = `${id}/${safe}`;
 
 	const client = makeClient(platform!.env);
-	const uploadUrl = await presignPut(client, platform!.env, key, size, safeCt, 900);
+	const uploadUrl = await presignPut(client, platform!.env, key, size, safeCt, 300);
 
 	return Response.json({ id, key, uploadUrl, downloadUrl: `${url.origin}/d/${id}` });
 };

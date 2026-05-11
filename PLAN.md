@@ -106,7 +106,9 @@ drop/
 
 ### Presigning with `aws4fetch`
 
-`aws4fetch` exposes an `AwsClient` that can sign arbitrary `Request` objects. To produce a presigned URL we sign a request with `aws: { signQuery: true }`. The `Content-Length` MUST be added to `SignedHeaders` to bind size into the signature.
+`aws4fetch` exposes an `AwsClient` that can sign arbitrary `Request` objects. To produce a presigned URL we sign a request with `aws: { signQuery: true }`.
+
+> **R2 limitation**: R2's query-string (presigned URL) auth does **not** support signing `content-length`. Passing `allHeaders: true` to `aws4fetch` includes `content-length` in `X-Amz-SignedHeaders`, which causes R2 to return `InvalidArgument: Authorization`. Only sign `host` (the default). Size enforcement is handled server-side in the presign endpoints — that is the primary defence.
 
 ```ts
 // lib/server/r2-sign.ts
@@ -127,7 +129,7 @@ export async function presignPut(
   key: string,
   contentLength: number,
   contentType: string,
-  expiresSeconds = 900,
+  expiresSeconds = 300,
 ): Promise<string> {
   const url = new URL(`${env.R2_ENDPOINT}/${env.R2_BUCKET}/${encodeKey(key)}`);
   url.searchParams.set('X-Amz-Expires', String(expiresSeconds));
@@ -140,9 +142,7 @@ export async function presignPut(
     },
   });
 
-  const signed = await client.sign(req, {
-    aws: { signQuery: true, allHeaders: true },
-  });
+  const signed = await client.sign(req, { aws: { signQuery: true } });
   return signed.url;
 }
 
@@ -164,7 +164,7 @@ export async function presignUploadPart(
     method: 'PUT',
     headers: { 'content-length': String(contentLength) },
   });
-  const signed = await client.sign(req, { aws: { signQuery: true, allHeaders: true } });
+  const signed = await client.sign(req, { aws: { signQuery: true } });
   return signed.url;
 }
 
@@ -356,7 +356,7 @@ export const POST: RequestHandler = async ({ request, platform, url }) => {
   const key = `${id}/${safe}`;
 
   const client = makeClient(platform!.env);
-  const uploadUrl = await presignPut(client, platform!.env, key, size, contentType, 900);
+  const uploadUrl = await presignPut(client, platform!.env, key, size, contentType, 300);
 
   return Response.json({ id, key, uploadUrl, downloadUrl: `${url.origin}/d/${id}` });
 };
@@ -616,8 +616,8 @@ export {};
 
 ### Presigned URL safety
 
-- **`Content-Length` is in `SignedHeaders`** (via `allHeaders: true` in `aws4fetch`). A leaked URL can't be repurposed for a different size.
-- **15-min expiry for single PUTs, 1h for multipart parts** (longer because 100GB uploads take time).
+- **Server-side size validation is the primary defence.** R2's presigned (query-string) auth does not support signing `content-length` — `allHeaders: true` causes `InvalidArgument: Authorization`. Size caps are enforced by the presign endpoints before a URL is issued.
+- **5-min expiry for single PUTs, 1h for multipart parts** (longer because 100GB uploads take time).
 - Never log presigned URLs.
 - No presigned GETs — downloads go through the R2 binding.
 
@@ -661,8 +661,8 @@ export {};
 
 ### Security headers
 
-HTML responses (via `hooks.server.ts`):
-- `Content-Security-Policy: default-src 'self'; script-src 'self'; connect-src 'self' https://*.r2.cloudflarestorage.com; frame-ancestors 'none'`
+HTML responses — CSP is set by SvelteKit via `csp: { mode: 'nonce' }` in `svelte.config.js` (do **not** set it manually in `hooks.server.ts`; that overrides the nonce SvelteKit injects into its inline hydration scripts, breaking the page). Other headers are set in `hooks.server.ts`:
+- `Content-Security-Policy: default-src 'self'; script-src 'self' 'nonce-…'; connect-src 'self' https://*.r2.cloudflarestorage.com; frame-ancestors 'none'` (nonce added automatically per request)
 - `Strict-Transport-Security: max-age=63072000; includeSubDomains`
 - `X-Frame-Options: DENY`
 - `Referrer-Policy: same-origin`
@@ -682,7 +682,7 @@ Download responses:
 
 ### The two most likely failure modes
 
-1. A presigned PUT leaks without size constraints → garbage upload eats storage. Mitigated by `Content-Length` in signed headers + billing alert.
+1. A presigned PUT leaks without size constraints → garbage upload eats storage. Mitigated by server-side size validation in the presign endpoint (R2 doesn't support signing `content-length` in presigned URLs) + billing alert.
 2. An uploaded HTML/SVG renders in-browser at your origin → stored XSS. Mitigated by `Content-Disposition: attachment` + `Content-Type: application/octet-stream` + `nosniff`.
 
 ---

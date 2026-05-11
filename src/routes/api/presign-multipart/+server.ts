@@ -45,15 +45,7 @@ export const POST: RequestHandler = async ({ request, platform, url }) => {
 	const parts: { partNumber: number; url: string; size: number }[] = [];
 	for (let i = 1; i <= partCount; i++) {
 		const thisSize = i === partCount ? size - (partCount - 1) * partSize : partSize;
-		const partUrl = await presignUploadPart(
-			client,
-			platform!.env,
-			key,
-			uploadId,
-			i,
-			thisSize,
-			3600
-		);
+		const partUrl = await presignUploadPart(client, platform!.env, key, uploadId, i, 3600);
 		parts.push({ partNumber: i, url: partUrl, size: thisSize });
 	}
 
