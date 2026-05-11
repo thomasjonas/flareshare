@@ -1,0 +1,7 @@
+name = "drop"
+compatibility_date = "2025-01-01"
+pages_build_output_dir = ".svelte-kit/cloudflare"
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "transfer"

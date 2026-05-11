@@ -1,0 +1,9 @@
+node_modules
+.svelte-kit
+.wrangler
+.npm-cache
+.env
+.env.*
+!.env.example
+dist
+.DS_Store
