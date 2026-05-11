@@ -13,10 +13,14 @@ export async function verifySession(
 	token: string,
 	secret: string
 ): Promise<{ id: number } | null> {
-	const valid = await jwt.verify(token, secret);
-	if (!valid) return null;
-	const { payload } = jwt.decode(token);
-	const id = Number(payload?.sub);
-	if (!Number.isInteger(id) || id <= 0) return null;
-	return { id };
+	try {
+		const valid = await jwt.verify(token, secret);
+		if (!valid) return null;
+		const { payload } = jwt.decode(token);
+		const id = Number(payload?.sub);
+		if (!Number.isInteger(id) || id <= 0) return null;
+		return { id };
+	} catch {
+		return null;
+	}
 }

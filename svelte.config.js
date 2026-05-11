@@ -5,7 +5,18 @@ import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
 const config = {
 	preprocess: vitePreprocess(),
 	kit: {
-		adapter: adapter()
+		adapter: adapter(),
+		csp: {
+			mode: 'nonce',
+			directives: {
+				'default-src': ['self'],
+				'script-src': ['self'],
+				'style-src': ['self', 'unsafe-inline'],
+				'connect-src': ['self', 'https://*.r2.cloudflarestorage.com'],
+				'frame-ancestors': ['none'],
+				'base-uri': ['self']
+			}
+		}
 	}
 };
 
