@@ -7,7 +7,7 @@ const config = {
 	kit: {
 		adapter: adapter(),
 		csp: {
-			mode: 'nonce',
+			mode: 'hash',
 			directives: {
 				'default-src': ['self'],
 				'script-src': ['self'],
