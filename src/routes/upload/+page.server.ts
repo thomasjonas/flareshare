@@ -4,6 +4,7 @@ import { makeClient, listObjects } from '$lib/server/r2-sign';
 
 export interface UploadItem {
 	id: string;
+	key: string;
 	filename: string;
 	size: number;
 	uploaded: string; // ISO date
@@ -26,6 +27,7 @@ export const load: PageServerLoad = async ({ locals, platform, url }) => {
 			const filename = obj.key.slice(slash + 1);
 			items.push({
 				id,
+				key: obj.key,
 				filename,
 				size: obj.size,
 				uploaded: obj.lastModified.toISOString(),

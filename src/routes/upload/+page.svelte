@@ -107,7 +107,7 @@
 			body: JSON.stringify({ filename: file.name, size: file.size, contentType: file.type || 'application/octet-stream' })
 		});
 		if (!res.ok) throw new Error(`presign-upload: ${await res.text()}`);
-		const { id, uploadUrl, downloadUrl } = await res.json();
+		const { id, key, uploadUrl, downloadUrl } = await res.json();
 
 		await putXhrWithProgress(
 			uploadUrl,
@@ -118,7 +118,7 @@
 
 		updateEntry(entry.id, { status: 'done', progress: 100, downloadUrl });
 		recentUploads = [
-			{ id, filename: file.name, size: file.size, uploaded: new Date().toISOString(), downloadUrl },
+			{ id, key, filename: file.name, size: file.size, uploaded: new Date().toISOString(), downloadUrl },
 			...recentUploads
 		];
 	}
@@ -173,7 +173,7 @@
 		updateEntry(entry.id, { status: 'done', progress: 100, downloadUrl });
 		const mpId = key.split('/')[0];
 		recentUploads = [
-			{ id: mpId, filename: file.name, size: file.size, uploaded: new Date().toISOString(), downloadUrl },
+			{ id: mpId, key, filename: file.name, size: file.size, uploaded: new Date().toISOString(), downloadUrl },
 			...recentUploads
 		];
 	}
@@ -238,6 +238,18 @@
 		navigator.clipboard.writeText(url).catch(() => {});
 	}
 
+	async function deleteUpload(key: string) {
+		if (!confirm('Delete this file? The link will stop working.')) return;
+		const res = await fetch('/api/delete', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ key })
+		});
+		if (res.ok) {
+			recentUploads = recentUploads.filter((u) => u.key !== key);
+		}
+	}
+
 	function fmt(bytes: number): string {
 		if (bytes < 1024) return `${bytes} B`;
 		if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -247,12 +259,12 @@
 </script>
 
 <svelte:head>
-	<title>Drop — Upload</title>
+	<title>Flareshare — Upload</title>
 </svelte:head>
 
 <main>
 	<header>
-		<h1>Drop</h1>
+		<h1>Flareshare</h1>
 		<form method="POST" action="/auth/logout">
 			<button type="submit">Sign out</button>
 		</form>
@@ -267,7 +279,8 @@
 		role="region"
 		aria-label="File upload area"
 	>
-		<p>Drag files here, or <button type="button" onclick={() => fileInput.click()}>browse</button></p>
+		<div class="zone-icon" aria-hidden="true">⬆</div>
+		<p>Drag files here, or <button type="button" class="browse-link" onclick={() => fileInput.click()}>browse</button></p>
 		<p class="hint">Up to 100 GB per file · Links expire in 7 days</p>
 		<input
 			bind:this={fileInput}
@@ -278,42 +291,37 @@
 		/>
 	</div>
 
-	{#if files.length > 0}
-		<ul class="file-list">
-			{#each files as f (f.id)}
-				<li class="file-item status-{f.status}">
-					<div class="file-meta">
-						<span class="file-name">{f.file.name}</span>
-						<span class="file-size">{fmt(f.file.size)}</span>
-					</div>
-
-					{#if f.status === 'uploading'}
-						<div class="progress-bar">
-							<div class="progress-fill" style="width:{f.progress}%"></div>
-						</div>
-						<span class="status-text">{f.progress}%</span>
-					{:else if f.status === 'done'}
-						<div class="done-row">
-							<a href={f.downloadUrl} class="download-link">{f.downloadUrl}</a>
-							<button type="button" onclick={() => copyLink(f.downloadUrl)}>Copy</button>
-							<span class="expiry">expires in 7 days</span>
-						</div>
-					{:else if f.status === 'error'}
-						<span class="status-text error">{f.error}</span>
-					{:else if f.status === 'queued'}
-						<span class="status-text">Queued…</span>
-					{/if}
-				</li>
-			{/each}
-		</ul>
-	{/if}
-
 	<section class="recent">
 		<h2>Recent uploads</h2>
-		{#if recentUploads.length === 0}
+		{#if files.length === 0 && recentUploads.length === 0}
 			<p class="hint">No uploads yet.</p>
 		{:else}
 			<ul class="file-list">
+				{#each files as f (f.id)}
+					<li class="file-item status-{f.status}">
+						<div class="file-meta">
+							<span class="file-name">{f.file.name}</span>
+							<span class="file-size">{fmt(f.file.size)}</span>
+						</div>
+
+						{#if f.status === 'uploading'}
+							<div class="progress-bar">
+								<div class="progress-fill" style="width:{f.progress}%"></div>
+							</div>
+							<span class="status-text">{f.progress}%</span>
+						{:else if f.status === 'done'}
+							<div class="done-row">
+								<a href={f.downloadUrl} class="download-link">{f.downloadUrl}</a>
+								<button type="button" onclick={() => copyLink(f.downloadUrl)}>Copy</button>
+								<span class="expiry">expires in 7 days</span>
+							</div>
+						{:else if f.status === 'error'}
+							<span class="status-text error">{f.error}</span>
+						{:else if f.status === 'queued'}
+							<span class="status-text">Queued…</span>
+						{/if}
+					</li>
+				{/each}
 				{#each recentUploads as u (u.id)}
 					<li class="file-item">
 						<div class="file-meta">
@@ -324,6 +332,7 @@
 						<div class="done-row">
 							<a href={u.downloadUrl} class="download-link">{u.downloadUrl}</a>
 							<button type="button" onclick={() => copyLink(u.downloadUrl)}>Copy</button>
+							<button type="button" class="delete-btn" onclick={() => deleteUpload(u.key)}>Delete</button>
 						</div>
 					</li>
 				{/each}
@@ -334,63 +343,246 @@
 
 <style>
 	main {
-		max-width: 720px;
-		margin: 2rem auto;
-		padding: 0 1rem;
-		font-family: system-ui, sans-serif;
+		max-width: 740px;
+		margin: 0 auto;
+		padding: 2rem 1.25rem 4rem;
 	}
+
 	header {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		margin-bottom: 1.5rem;
+		margin-bottom: 2rem;
+		padding-bottom: 1.25rem;
+		border-bottom: 1px solid var(--border);
 	}
-	h1 { margin: 0; }
 
+	h1 {
+		margin: 0;
+		font-size: 1.25rem;
+		font-weight: 700;
+		letter-spacing: -0.02em;
+	}
+
+	header button {
+		background: none;
+		border: none;
+		padding: 0.35rem 0.6rem;
+		color: var(--muted);
+		font-size: 0.875rem;
+		border-radius: var(--radius-sm);
+		transition: color 0.15s, background 0.15s;
+	}
+
+	header button:hover {
+		color: var(--text);
+		background: var(--surface);
+	}
+
+	/* --- Upload zone --- */
 	.zone {
-		border: 2px dashed #ccc;
-		border-radius: 8px;
-		padding: 2.5rem 1rem;
+		border: 1px solid var(--border);
+		border-radius: var(--radius);
+		padding: 3.5rem 1.5rem;
 		text-align: center;
+		background: var(--surface);
 		transition: border-color 0.15s, background 0.15s;
 		cursor: default;
 	}
-	.zone.dragging {
-		border-color: #0066ff;
-		background: #f0f6ff;
-	}
-	.hint { color: #888; font-size: 0.85rem; margin: 0.25rem 0 0; }
 
-	.file-list { list-style: none; padding: 0; margin-top: 1.5rem; }
+	.zone:hover {
+		border-color: #a1a1aa;
+	}
+
+	.zone.dragging {
+		border-color: var(--border-focus);
+		background: #eff6ff;
+	}
+
+	.zone-icon {
+		font-size: 1.75rem;
+		margin-bottom: 0.75rem;
+		opacity: 0.4;
+	}
+
+	.zone p {
+		margin: 0;
+		color: var(--text);
+		font-size: 0.95rem;
+	}
+
+	.browse-link {
+		background: none;
+		border: none;
+		padding: 0;
+		color: var(--accent);
+		text-decoration: underline;
+		text-underline-offset: 2px;
+		font-size: inherit;
+	}
+
+	.browse-link:hover {
+		color: var(--accent-hover);
+	}
+
+	.hint {
+		color: var(--muted);
+		font-size: 0.8rem;
+		margin: 0.4rem 0 0;
+	}
+
+	/* --- File list --- */
+	.file-list {
+		list-style: none;
+		padding: 0;
+		margin-top: 1.25rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+	}
+
 	.file-item {
-		border: 1px solid #e0e0e0;
-		border-radius: 6px;
-		padding: 0.75rem 1rem;
+		border: 1px solid var(--border);
+		border-radius: var(--radius);
+		padding: 1rem 1.25rem;
+		box-shadow: var(--shadow-sm);
+		background: var(--bg);
+	}
+
+	.file-meta {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.5rem 1rem;
+		align-items: baseline;
 		margin-bottom: 0.5rem;
 	}
-	.file-meta { display: flex; gap: 1rem; align-items: baseline; margin-bottom: 0.4rem; }
-	.file-name { font-weight: 500; word-break: break-all; }
-	.file-size { color: #888; font-size: 0.85rem; white-space: nowrap; }
 
-	.progress-bar {
-		height: 6px;
-		background: #eee;
-		border-radius: 3px;
-		overflow: hidden;
-		margin-bottom: 0.25rem;
+	.file-name {
+		font-weight: 600;
+		word-break: break-all;
+		font-size: 0.9rem;
 	}
-	.progress-fill { height: 100%; background: #0066ff; transition: width 0.2s; }
 
-	.done-row { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
-	.download-link { font-size: 0.85rem; word-break: break-all; }
-	.expiry { font-size: 0.8rem; color: #888; }
+	.file-size {
+		color: var(--muted);
+		font-size: 0.8rem;
+		white-space: nowrap;
+	}
 
-	.status-text { font-size: 0.85rem; color: #555; }
-	.status-text.error { color: #c00; }
-	.status-done { border-color: #4caf50; }
-	.status-error { border-color: #f44336; }
+	.file-date {
+		color: var(--muted);
+		font-size: 0.78rem;
+		white-space: nowrap;
+		opacity: 0.8;
+	}
 
-	.recent { margin-top: 2.5rem; }
-	.recent h2 { font-size: 1rem; font-weight: 600; margin-bottom: 0.75rem; }
-	.file-date { font-size: 0.8rem; color: #aaa; white-space: nowrap; }
+	/* --- Progress bar --- */
+	.progress-bar {
+		height: 8px;
+		background: var(--border);
+		border-radius: 999px;
+		overflow: hidden;
+		margin-bottom: 0.35rem;
+	}
+
+	.progress-fill {
+		height: 100%;
+		background: var(--accent);
+		transition: width 0.25s ease;
+		border-radius: 999px;
+	}
+
+	/* --- Status & actions --- */
+	.done-row {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		flex-wrap: wrap;
+	}
+
+	.download-link {
+		font-size: 0.82rem;
+		color: var(--muted);
+		text-decoration: none;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		flex: 1;
+	}
+
+	.download-link:hover {
+		color: var(--accent);
+	}
+
+	.expiry {
+		font-size: 0.78rem;
+		color: var(--muted);
+		opacity: 0.7;
+		white-space: nowrap;
+	}
+
+	.status-text {
+		font-size: 0.82rem;
+		color: var(--muted);
+	}
+
+	.status-text.error {
+		color: var(--error);
+	}
+
+	.status-error {
+		border-color: #fca5a5;
+	}
+
+	.status-done {
+		border-color: #86efac;
+	}
+
+	/* --- Buttons in done row --- */
+	button {
+		background: none;
+		border: none;
+		padding: 0;
+	}
+
+	.done-row button {
+		font-size: 0.8rem;
+		font-weight: 500;
+		padding: 0.3rem 0.7rem;
+		border-radius: 999px;
+		white-space: nowrap;
+		transition: background 0.15s, color 0.15s;
+	}
+
+	.done-row button:not(.delete-btn) {
+		background: var(--accent);
+		color: #fff;
+	}
+
+	.done-row button:not(.delete-btn):hover {
+		background: var(--accent-hover);
+	}
+
+	.delete-btn {
+		color: var(--muted);
+	}
+
+	.delete-btn:hover {
+		color: var(--error);
+	}
+
+	/* --- Recent section --- */
+	.recent {
+		margin-top: 2.5rem;
+	}
+
+	.recent h2 {
+		font-size: 0.7rem;
+		font-weight: 600;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--muted);
+		margin: 0 0 1rem;
+	}
 </style>

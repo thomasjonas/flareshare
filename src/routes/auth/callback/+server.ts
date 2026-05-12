@@ -31,7 +31,7 @@ export const GET: RequestHandler = async ({ url, cookies, platform }) => {
 	}
 
 	const userRes = await fetch('https://api.github.com/user', {
-		headers: { Authorization: `Bearer ${access_token}`, 'User-Agent': 'drop-app' }
+		headers: { Authorization: `Bearer ${access_token}`, 'User-Agent': 'flareshare-app' }
 	});
 
 	if (!userRes.ok) {

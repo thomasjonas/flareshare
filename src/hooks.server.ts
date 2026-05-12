@@ -1,7 +1,7 @@
 import type { Handle } from '@sveltejs/kit';
 import { verifySession } from '$lib/server/session';
 
-const PROTECTED = [/^\/upload/, /^\/api\/presign-/, /^\/api\/complete-/, /^\/api\/abort-/];
+const PROTECTED = [/^\/upload/, /^\/api\/presign-/, /^\/api\/complete-/, /^\/api\/abort-/, /^\/api\/delete/];
 
 export const handle: Handle = async ({ event, resolve }) => {
 	const cookie = event.cookies.get('session');
