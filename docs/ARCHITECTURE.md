@@ -1,4 +1,6 @@
-# Personal File Drop — Implementation Plan
+# Flareshare — Architecture
+
+> Original design document. Reflects the implementation as of v0.0.1.
 
 A minimal, single-user WeTransfer clone. GitHub OAuth gates uploads, anyone with a link can download, no database, files auto-expire via R2 lifecycle rules.
 
