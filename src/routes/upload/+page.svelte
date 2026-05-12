@@ -1,4 +1,8 @@
 <script lang="ts">
+	import type { PageData } from './$types';
+	import type { UploadItem } from './+page.server';
+	export let data: PageData;
+
 	// --- Constants ---
 	const SINGLE_PUT_MAX = 5 * 1024 * 1024 * 1024; // 5 GB
 	const TOTAL_MAX = 100 * 1024 * 1024 * 1024; // 100 GB
@@ -25,6 +29,7 @@
 	let files: FileEntry[] = [];
 	let dragging = false;
 	let fileInput: HTMLInputElement;
+	let recentUploads: UploadItem[] = data.uploads ?? [];
 
 	// --- Helpers ---
 	function makeEntry(file: File): FileEntry {
@@ -102,7 +107,7 @@
 			body: JSON.stringify({ filename: file.name, size: file.size, contentType: file.type || 'application/octet-stream' })
 		});
 		if (!res.ok) throw new Error(`presign-upload: ${await res.text()}`);
-		const { uploadUrl, downloadUrl } = await res.json();
+		const { id, uploadUrl, downloadUrl } = await res.json();
 
 		await putXhrWithProgress(
 			uploadUrl,
@@ -112,6 +117,10 @@
 		);
 
 		updateEntry(entry.id, { status: 'done', progress: 100, downloadUrl });
+		recentUploads = [
+			{ id, filename: file.name, size: file.size, uploaded: new Date().toISOString(), downloadUrl },
+			...recentUploads
+		];
 	}
 
 	// Upload a file >5 GB using multipart with concurrent part uploads.
@@ -164,6 +173,11 @@
 		if (!completeRes.ok) throw new Error(`complete-multipart: ${await completeRes.text()}`);
 
 		updateEntry(entry.id, { status: 'done', progress: 100, downloadUrl });
+		const mpId = key.split('/')[0];
+		recentUploads = [
+			{ id: mpId, filename: file.name, size: file.size, uploaded: new Date().toISOString(), downloadUrl },
+			...recentUploads
+		];
 	}
 
 	async function uploadEntry(entry: FileEntry) {
@@ -296,6 +310,29 @@
 			{/each}
 		</ul>
 	{/if}
+
+	<section class="recent">
+		<h2>Recent uploads</h2>
+		{#if recentUploads.length === 0}
+			<p class="hint">No uploads yet.</p>
+		{:else}
+			<ul class="file-list">
+				{#each recentUploads as u (u.id)}
+					<li class="file-item">
+						<div class="file-meta">
+							<span class="file-name">{u.filename}</span>
+							<span class="file-size">{fmt(u.size)}</span>
+							<span class="file-date">{new Date(u.uploaded).toLocaleString()}</span>
+						</div>
+						<div class="done-row">
+							<a href={u.downloadUrl} class="download-link">{u.downloadUrl}</a>
+							<button type="button" on:click={() => copyLink(u.downloadUrl)}>Copy</button>
+						</div>
+					</li>
+				{/each}
+			</ul>
+		{/if}
+	</section>
 </main>
 
 <style>
@@ -355,4 +392,8 @@
 	.status-text.error { color: #c00; }
 	.status-done { border-color: #4caf50; }
 	.status-error { border-color: #f44336; }
+
+	.recent { margin-top: 2.5rem; }
+	.recent h2 { font-size: 1rem; font-weight: 600; margin-bottom: 0.75rem; }
+	.file-date { font-size: 0.8rem; color: #aaa; white-space: nowrap; }
 </style>

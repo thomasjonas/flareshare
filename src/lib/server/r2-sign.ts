@@ -108,3 +108,44 @@ export async function abortMultipart(
 	const url = `${objectUrl(env, key)}?uploadId=${encodeURIComponent(uploadId)}`;
 	await client.fetch(url, { method: 'DELETE' });
 }
+
+export interface S3Object {
+	key: string;
+	size: number;
+	lastModified: Date;
+}
+
+export async function listObjects(
+	client: AwsClient,
+	env: App.Platform['env']
+): Promise<S3Object[]> {
+	const results: S3Object[] = [];
+	let continuationToken: string | undefined;
+
+	do {
+		const url = new URL(`${env.R2_ENDPOINT}/${env.R2_BUCKET}`);
+		url.searchParams.set('list-type', '2');
+		url.searchParams.set('max-keys', '1000');
+		if (continuationToken) url.searchParams.set('continuation-token', continuationToken);
+
+		const res = await client.fetch(url.toString(), { method: 'GET' });
+		if (!res.ok) throw new Error(`listObjects ${res.status}: ${await res.text()}`);
+
+		const xml = await res.text();
+
+		const keys = [...xml.matchAll(/<Key>([^<]+)<\/Key>/g)].map((m) => m[1]);
+		const sizes = [...xml.matchAll(/<Size>([^<]+)<\/Size>/g)].map((m) => Number(m[1]));
+		const dates = [...xml.matchAll(/<LastModified>([^<]+)<\/LastModified>/g)].map(
+			(m) => new Date(m[1])
+		);
+
+		for (let i = 0; i < keys.length; i++) {
+			results.push({ key: keys[i], size: sizes[i], lastModified: dates[i] });
+		}
+
+		const nextToken = xml.match(/<NextContinuationToken>([^<]+)<\/NextContinuationToken>/)?.[1];
+		continuationToken = nextToken;
+	} while (continuationToken);
+
+	return results;
+}
