@@ -8,3 +8,5 @@ node_modules
 dist
 .DS_Store
 .dev.vars
+design_handoff_flareshare/
+vite.config.ts.timestamp-*

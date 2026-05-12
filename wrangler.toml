@@ -3,13 +3,8 @@ compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
 pages_build_output_dir = ".svelte-kit/cloudflare"
 
-[vars]
-GITHUB_CLIENT_ID = "Iv23li1161SfPjXE071x"
-ALLOWED_GITHUB_ID = "1451162"
-R2_ACCOUNT_ID = "d053edfef8919466671d1e577cbd0ca9"
-R2_ACCESS_KEY_ID = "f2412bd731a20ad5e4e90dc8c0a33cce"
-R2_BUCKET = "transfer"
-R2_ENDPOINT = "https://d053edfef8919466671d1e577cbd0ca9.r2.cloudflarestorage.com"
+# All runtime variables are set via Cloudflare Pages dashboard (or `wrangler pages secret put`).
+# For local dev, copy .dev.vars.example → .dev.vars and fill in the values.
 
 [[r2_buckets]]
 binding = "BUCKET"
