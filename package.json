@@ -12,15 +12,15 @@
   "devDependencies": {
     "@sveltejs/adapter-cloudflare": "^7.2.8",
     "@sveltejs/kit": "^2",
-    "@sveltejs/vite-plugin-svelte": "^3",
-    "svelte": "^4",
-    "svelte-check": "^3",
-    "typescript": "^5",
-    "vite": "^5",
+    "@sveltejs/vite-plugin-svelte": "^7.1.2",
+    "svelte": "^5.55.5",
+    "svelte-check": "^4.4.8",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.12",
     "wrangler": "^4.90.0"
   },
   "dependencies": {
-    "@tsndr/cloudflare-worker-jwt": "^2",
+    "@tsndr/cloudflare-worker-jwt": "^3.2.1",
     "aws4fetch": "^1",
     "nanoid": "^5"
   },

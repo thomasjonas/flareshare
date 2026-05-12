@@ -1,7 +1,9 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import type { PageData } from './$types';
 	import type { UploadItem } from './+page.server';
-	export let data: PageData;
+
+	let { data }: { data: PageData } = $props();
 
 	// --- Constants ---
 	const SINGLE_PUT_MAX = 5 * 1024 * 1024 * 1024; // 5 GB
@@ -17,19 +19,18 @@
 		id: string;
 		file: File;
 		status: FileStatus;
-		progress: number; // 0–100
+		progress: number;
 		downloadUrl: string;
 		error: string;
-		// multipart state for abort on cancel
 		_key?: string;
 		_uploadId?: string;
 	}
 
 	// --- State ---
-	let files: FileEntry[] = [];
-	let dragging = false;
+	let files: FileEntry[] = $state([]);
+	let dragging = $state(false);
 	let fileInput: HTMLInputElement;
-	let recentUploads: UploadItem[] = data.uploads ?? [];
+	let recentUploads: UploadItem[] = $state(untrack(() => data.uploads ?? []));
 
 	// --- Helpers ---
 	function makeEntry(file: File): FileEntry {
@@ -98,7 +99,6 @@
 		throw new Error('unreachable');
 	}
 
-	// Upload a file ≤5 GB with a single presigned PUT + progress tracking.
 	async function uploadSingle(entry: FileEntry) {
 		const { file } = entry;
 		const res = await fetch('/api/presign-upload', {
@@ -123,7 +123,6 @@
 		];
 	}
 
-	// Upload a file >5 GB using multipart with concurrent part uploads.
 	async function uploadMultipart(entry: FileEntry) {
 		const { file } = entry;
 		const partCount = Math.ceil(file.size / PART_SIZE);
@@ -147,7 +146,6 @@
 		const completedParts: { PartNumber: number; ETag: string }[] = [];
 		let uploadedBytes = 0;
 
-		// Process parts with a concurrency pool.
 		const queue = [...parts] as { partNumber: number; url: string; size: number }[];
 		const workers = Array.from({ length: CONCURRENCY }, async () => {
 			while (queue.length > 0) {
@@ -192,7 +190,6 @@
 			const msg = err instanceof Error ? err.message : 'Unknown error';
 			updateEntry(entry.id, { status: 'error', error: msg });
 
-			// Best-effort abort if multipart was initiated.
 			const current = files.find((f) => f.id === entry.id);
 			if (current?._key && current?._uploadId) {
 				fetch('/api/abort-multipart', {
@@ -217,7 +214,6 @@
 		valid.forEach((e) => uploadEntry(e));
 	}
 
-	// Drag-and-drop handlers
 	function onDragOver(e: DragEvent) {
 		e.preventDefault();
 		dragging = true;
@@ -262,22 +258,23 @@
 		</form>
 	</header>
 
-	<!-- svelte-ignore a11y-no-static-element-interactions -->
 	<div
 		class="zone"
 		class:dragging
-		on:dragover={onDragOver}
-		on:dragleave={onDragLeave}
-		on:drop={onDrop}
+		ondragover={onDragOver}
+		ondragleave={onDragLeave}
+		ondrop={onDrop}
+		role="region"
+		aria-label="File upload area"
 	>
-		<p>Drag files here, or <button type="button" on:click={() => fileInput.click()}>browse</button></p>
+		<p>Drag files here, or <button type="button" onclick={() => fileInput.click()}>browse</button></p>
 		<p class="hint">Up to 100 GB per file · Links expire in 7 days</p>
 		<input
 			bind:this={fileInput}
 			type="file"
 			multiple
 			style="display:none"
-			on:change={onFileInput}
+			onchange={onFileInput}
 		/>
 	</div>
 
@@ -298,7 +295,7 @@
 					{:else if f.status === 'done'}
 						<div class="done-row">
 							<a href={f.downloadUrl} class="download-link">{f.downloadUrl}</a>
-							<button type="button" on:click={() => copyLink(f.downloadUrl)}>Copy</button>
+							<button type="button" onclick={() => copyLink(f.downloadUrl)}>Copy</button>
 							<span class="expiry">expires in 7 days</span>
 						</div>
 					{:else if f.status === 'error'}
@@ -326,7 +323,7 @@
 						</div>
 						<div class="done-row">
 							<a href={u.downloadUrl} class="download-link">{u.downloadUrl}</a>
-							<button type="button" on:click={() => copyLink(u.downloadUrl)}>Copy</button>
+							<button type="button" onclick={() => copyLink(u.downloadUrl)}>Copy</button>
 						</div>
 					</li>
 				{/each}
