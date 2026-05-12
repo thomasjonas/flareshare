@@ -1,588 +1,1128 @@
 <script lang="ts">
-	import { untrack } from 'svelte';
-	import type { PageData } from './$types';
-	import type { UploadItem } from './+page.server';
+  import { untrack } from 'svelte'
+  import type { PageData } from './$types'
+  import type { UploadItem } from './+page.server'
 
-	let { data }: { data: PageData } = $props();
+  // --- Constants ---
+  const SINGLE_PUT_MAX = 5 * 1024 * 1024 * 1024 // 5 GB
+  const TOTAL_MAX = 100 * 1024 * 1024 * 1024 // 100 GB
+  const PART_SIZE = 64 * 1024 * 1024 // 64 MB
+  const CONCURRENCY = 4
+  const MAX_RETRIES = 3
+  const COPIED_MS = 1800
 
-	// --- Constants ---
-	const SINGLE_PUT_MAX = 5 * 1024 * 1024 * 1024; // 5 GB
-	const TOTAL_MAX = 100 * 1024 * 1024 * 1024; // 100 GB
-	const PART_SIZE = 64 * 1024 * 1024; // 64 MB
-	const CONCURRENCY = 4;
-	const MAX_RETRIES = 3;
+  // --- Types ---
+  type FileStatus = 'queued' | 'uploading' | 'done' | 'error' | 'aborted'
 
-	// --- Types ---
-	type FileStatus = 'queued' | 'uploading' | 'done' | 'error' | 'aborted';
+  interface FileEntry {
+    id: string
+    file: File
+    status: FileStatus
+    progress: number
+    downloadUrl: string
+    error: string
+    startedAt: number
+    uploadedBytes: number
+    speed: number // bytes/sec
+    eta: number // seconds
+    _key?: string
+    _uploadId?: string
+  }
 
-	interface FileEntry {
-		id: string;
-		file: File;
-		status: FileStatus;
-		progress: number;
-		downloadUrl: string;
-		error: string;
-		_key?: string;
-		_uploadId?: string;
-	}
+  type RecentItem = UploadItem & { justCopied?: boolean }
 
-	// --- State ---
-	let files: FileEntry[] = $state([]);
-	let dragging = $state(false);
-	let fileInput: HTMLInputElement;
-	let recentUploads: UploadItem[] = $state(untrack(() => data.uploads ?? []));
+  let { data }: { data: PageData } = $props()
 
-	// --- Helpers ---
-	function makeEntry(file: File): FileEntry {
-		return {
-			id: Math.random().toString(36).slice(2),
-			file,
-			status: 'queued',
-			progress: 0,
-			downloadUrl: '',
-			error: ''
-		};
-	}
+  // --- State ---
+  let files: FileEntry[] = $state([])
+  let dragging = $state(false)
+  let fileInput: HTMLInputElement
+  let recentUploads: RecentItem[] = $state(untrack(() => data.uploads ?? []))
+  let copiedId: string | null = $state(null)
+  let copyTimer: ReturnType<typeof setTimeout> | null = null
 
-	function updateEntry(id: string, patch: Partial<FileEntry>) {
-		files = files.map((f) => (f.id === id ? { ...f, ...patch } : f));
-	}
+  // --- Helpers ---
+  function makeEntry(file: File): FileEntry {
+    return {
+      id: Math.random().toString(36).slice(2),
+      file,
+      status: 'queued',
+      progress: 0,
+      downloadUrl: '',
+      error: '',
+      startedAt: 0,
+      uploadedBytes: 0,
+      speed: 0,
+      eta: Infinity,
+    }
+  }
 
-	function putXhr(url: string, blob: Blob, contentType: string): Promise<string> {
-		return new Promise((resolve, reject) => {
-			const xhr = new XMLHttpRequest();
-			xhr.open('PUT', url);
-			xhr.setRequestHeader('Content-Type', contentType);
-			xhr.onload = () => {
-				if (xhr.status >= 200 && xhr.status < 300) {
-					resolve(xhr.getResponseHeader('ETag') ?? '');
-				} else {
-					reject(new Error(`PUT ${xhr.status}`));
-				}
-			};
-			xhr.onerror = () => reject(new Error('Network error'));
-			xhr.send(blob);
-		});
-	}
+  function updateEntry(id: string, patch: Partial<FileEntry>) {
+    files = files.map(f => (f.id === id ? { ...f, ...patch } : f))
+  }
 
-	function putXhrWithProgress(
-		url: string,
-		blob: Blob,
-		contentType: string,
-		onProgress: (pct: number) => void
-	): Promise<void> {
-		return new Promise((resolve, reject) => {
-			const xhr = new XMLHttpRequest();
-			xhr.open('PUT', url);
-			xhr.setRequestHeader('Content-Type', contentType);
-			xhr.upload.onprogress = (e) => {
-				if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
-			};
-			xhr.onload = () => {
-				if (xhr.status >= 200 && xhr.status < 300) resolve();
-				else reject(new Error(`PUT ${xhr.status}`));
-			};
-			xhr.onerror = () => reject(new Error('Network error'));
-			xhr.send(blob);
-		});
-	}
+  function fmt(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`
+    if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`
+    if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`
+    return `${(bytes / 1024 ** 3).toFixed(2)} GB`
+  }
 
-	async function withRetry<T>(fn: () => Promise<T>, retries = MAX_RETRIES): Promise<T> {
-		for (let attempt = 0; attempt < retries; attempt++) {
-			try {
-				return await fn();
-			} catch (err) {
-				if (attempt === retries - 1) throw err;
-				await new Promise((r) => setTimeout(r, 500 * 2 ** attempt));
-			}
-		}
-		throw new Error('unreachable');
-	}
+  function fmtSpeed(bps: number): string {
+    if (!bps || !isFinite(bps)) return '—'
+    if (bps < 1024 ** 2) return `${(bps / 1024).toFixed(0)} KB/s`
+    if (bps < 1024 ** 3) return `${(bps / 1024 ** 2).toFixed(1)} MB/s`
+    return `${(bps / 1024 ** 3).toFixed(2)} GB/s`
+  }
 
-	async function uploadSingle(entry: FileEntry) {
-		const { file } = entry;
-		const res = await fetch('/api/presign-upload', {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ filename: file.name, size: file.size, contentType: file.type || 'application/octet-stream' })
-		});
-		if (!res.ok) throw new Error(`presign-upload: ${await res.text()}`);
-		const { id, key, uploadUrl, downloadUrl } = await res.json();
+  function fmtEta(s: number): string {
+    if (!isFinite(s) || isNaN(s)) return '—'
+    if (s < 60) return `${Math.ceil(s)}s`
+    if (s < 3600) return `${Math.floor(s / 60)}m ${Math.ceil(s % 60)}s`
+    return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`
+  }
 
-		await putXhrWithProgress(
-			uploadUrl,
-			file,
-			file.type || 'application/octet-stream',
-			(pct) => updateEntry(entry.id, { progress: pct })
-		);
+  function timeAgo(iso: string): string {
+    const t = Date.parse(iso)
+    if (isNaN(t)) return ''
+    const diff = (Date.now() - t) / 1000
+    if (diff < 60) return 'just now'
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
+    if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`
+    return new Date(t).toLocaleDateString()
+  }
 
-		updateEntry(entry.id, { status: 'done', progress: 100, downloadUrl });
-		recentUploads = [
-			{ id, key, filename: file.name, size: file.size, uploaded: new Date().toISOString(), downloadUrl },
-			...recentUploads
-		];
-	}
+  function expiresIn(iso: string): string {
+    const t = Date.parse(iso)
+    if (isNaN(t)) return '7d 00h'
+    const ms = 7 * 86400 * 1000 - (Date.now() - t)
+    if (ms <= 0) return 'expired'
+    const days = Math.floor(ms / 86400000)
+    const hours = Math.floor((ms % 86400000) / 3600000)
+    return `${days}d ${String(hours).padStart(2, '0')}h`
+  }
 
-	async function uploadMultipart(entry: FileEntry) {
-		const { file } = entry;
-		const partCount = Math.ceil(file.size / PART_SIZE);
+  // --- Upload helpers (unchanged from previous implementation) ---
+  function putXhr(url: string, blob: Blob, contentType: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest()
+      xhr.open('PUT', url)
+      xhr.setRequestHeader('Content-Type', contentType)
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(xhr.getResponseHeader('ETag') ?? '')
+        } else {
+          reject(new Error(`PUT ${xhr.status}`))
+        }
+      }
+      xhr.onerror = () => reject(new Error('Network error'))
+      xhr.send(blob)
+    })
+  }
 
-		const res = await fetch('/api/presign-multipart', {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({
-				filename: file.name,
-				size: file.size,
-				contentType: file.type || 'application/octet-stream',
-				partSize: PART_SIZE,
-				partCount
-			})
-		});
-		if (!res.ok) throw new Error(`presign-multipart: ${await res.text()}`);
-		const { key, uploadId, parts, downloadUrl } = await res.json();
+  function putXhrWithProgress(
+    url: string,
+    blob: Blob,
+    contentType: string,
+    onProgress: (loaded: number) => void,
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest()
+      xhr.open('PUT', url)
+      xhr.setRequestHeader('Content-Type', contentType)
+      xhr.upload.onprogress = e => {
+        if (e.lengthComputable) onProgress(e.loaded)
+      }
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) resolve()
+        else reject(new Error(`PUT ${xhr.status}`))
+      }
+      xhr.onerror = () => reject(new Error('Network error'))
+      xhr.send(blob)
+    })
+  }
 
-		updateEntry(entry.id, { _key: key, _uploadId: uploadId });
+  async function withRetry<T>(fn: () => Promise<T>, retries = MAX_RETRIES): Promise<T> {
+    for (let attempt = 0; attempt < retries; attempt++) {
+      try {
+        return await fn()
+      } catch (err) {
+        if (attempt === retries - 1) throw err
+        await new Promise(r => setTimeout(r, 500 * 2 ** attempt))
+      }
+    }
+    throw new Error('unreachable')
+  }
 
-		const completedParts: { PartNumber: number; ETag: string }[] = [];
-		let uploadedBytes = 0;
+  function tickProgress(entry: FileEntry, loaded: number, total: number) {
+    const now = performance.now()
+    const elapsedSec = (now - entry.startedAt) / 1000
+    const speed = elapsedSec > 0 ? loaded / elapsedSec : 0
+    const remaining = Math.max(0, total - loaded)
+    const eta = speed > 0 ? remaining / speed : Infinity
+    updateEntry(entry.id, {
+      progress: Math.round((loaded / total) * 100),
+      uploadedBytes: loaded,
+      speed,
+      eta,
+    })
+  }
 
-		const queue = [...parts] as { partNumber: number; url: string; size: number }[];
-		const workers = Array.from({ length: CONCURRENCY }, async () => {
-			while (queue.length > 0) {
-				const part = queue.shift()!;
-				const start = (part.partNumber - 1) * PART_SIZE;
-				const blob = file.slice(start, start + part.size);
+  function onCompleted(entryId: string, item: RecentItem) {
+    files = files.filter(f => f.id !== entryId)
+    const flagged: RecentItem = { ...item, justCopied: true }
+    recentUploads = [flagged, ...recentUploads]
+    navigator.clipboard?.writeText(item.downloadUrl).catch(() => {})
+    setTimeout(() => {
+      recentUploads = recentUploads.map(u =>
+        u.id === flagged.id ? { ...u, justCopied: false } : u,
+      )
+    }, COPIED_MS)
+  }
 
-				const etag = await withRetry(() => putXhr(part.url, blob, 'application/octet-stream'));
+  async function uploadSingle(entry: FileEntry) {
+    const { file } = entry
+    const res = await fetch('/api/presign-upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filename: file.name,
+        size: file.size,
+        contentType: file.type || 'application/octet-stream',
+      }),
+    })
+    if (!res.ok) throw new Error(`presign-upload: ${await res.text()}`)
+    const { id, key, uploadUrl, downloadUrl } = await res.json()
 
-				completedParts.push({ PartNumber: part.partNumber, ETag: etag.replace(/"/g, '') });
-				uploadedBytes += part.size;
-				updateEntry(entry.id, { progress: Math.round((uploadedBytes / file.size) * 100) });
-			}
-		});
+    await putXhrWithProgress(uploadUrl, file, file.type || 'application/octet-stream', loaded =>
+      tickProgress(entry, loaded, file.size),
+    )
 
-		await Promise.all(workers);
+    onCompleted(entry.id, {
+      id,
+      key,
+      filename: file.name,
+      size: file.size,
+      uploaded: new Date().toISOString(),
+      downloadUrl,
+    })
+  }
 
-		const completeRes = await fetch('/api/complete-multipart', {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ key, uploadId, parts: completedParts })
-		});
-		if (!completeRes.ok) throw new Error(`complete-multipart: ${await completeRes.text()}`);
+  async function uploadMultipart(entry: FileEntry) {
+    const { file } = entry
+    const partCount = Math.ceil(file.size / PART_SIZE)
 
-		updateEntry(entry.id, { status: 'done', progress: 100, downloadUrl });
-		const mpId = key.split('/')[0];
-		recentUploads = [
-			{ id: mpId, key, filename: file.name, size: file.size, uploaded: new Date().toISOString(), downloadUrl },
-			...recentUploads
-		];
-	}
+    const res = await fetch('/api/presign-multipart', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filename: file.name,
+        size: file.size,
+        contentType: file.type || 'application/octet-stream',
+        partSize: PART_SIZE,
+        partCount,
+      }),
+    })
+    if (!res.ok) throw new Error(`presign-multipart: ${await res.text()}`)
+    const { key, uploadId, parts, downloadUrl } = await res.json()
 
-	async function uploadEntry(entry: FileEntry) {
-		updateEntry(entry.id, { status: 'uploading', progress: 0 });
-		try {
-			if (entry.file.size <= SINGLE_PUT_MAX) {
-				await uploadSingle(entry);
-			} else {
-				await uploadMultipart(entry);
-			}
-		} catch (err) {
-			const msg = err instanceof Error ? err.message : 'Unknown error';
-			updateEntry(entry.id, { status: 'error', error: msg });
+    updateEntry(entry.id, { _key: key, _uploadId: uploadId })
 
-			const current = files.find((f) => f.id === entry.id);
-			if (current?._key && current?._uploadId) {
-				fetch('/api/abort-multipart', {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({ key: current._key, uploadId: current._uploadId })
-				}).catch(() => {});
-			}
-		}
-	}
+    const completedParts: { PartNumber: number; ETag: string }[] = []
+    let uploadedBytes = 0
 
-	function addFiles(incoming: File[]) {
-		const valid: FileEntry[] = [];
-		for (const f of incoming) {
-			if (f.size > TOTAL_MAX) {
-				alert(`${f.name} exceeds the 100 GB limit.`);
-				continue;
-			}
-			valid.push(makeEntry(f));
-		}
-		files = [...files, ...valid];
-		valid.forEach((e) => uploadEntry(e));
-	}
+    const queue = [...parts] as { partNumber: number; url: string; size: number }[]
+    const workers = Array.from({ length: CONCURRENCY }, async () => {
+      while (queue.length > 0) {
+        const part = queue.shift()!
+        const start = (part.partNumber - 1) * PART_SIZE
+        const blob = file.slice(start, start + part.size)
+        const etag = await withRetry(() => putXhr(part.url, blob, 'application/octet-stream'))
+        completedParts.push({ PartNumber: part.partNumber, ETag: etag.replace(/"/g, '') })
+        uploadedBytes += part.size
+        tickProgress(entry, uploadedBytes, file.size)
+      }
+    })
+    await Promise.all(workers)
 
-	function onDragOver(e: DragEvent) {
-		e.preventDefault();
-		dragging = true;
-	}
-	function onDragLeave() {
-		dragging = false;
-	}
-	function onDrop(e: DragEvent) {
-		e.preventDefault();
-		dragging = false;
-		const dropped = Array.from(e.dataTransfer?.files ?? []);
-		if (dropped.length) addFiles(dropped);
-	}
-	function onFileInput(e: Event) {
-		const target = e.target as HTMLInputElement;
-		const chosen = Array.from(target.files ?? []);
-		if (chosen.length) addFiles(chosen);
-		target.value = '';
-	}
+    const completeRes = await fetch('/api/complete-multipart', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, uploadId, parts: completedParts }),
+    })
+    if (!completeRes.ok) throw new Error(`complete-multipart: ${await completeRes.text()}`)
 
-	function copyLink(url: string) {
-		navigator.clipboard.writeText(url).catch(() => {});
-	}
+    const mpId = key.split('/')[0]
+    onCompleted(entry.id, {
+      id: mpId,
+      key,
+      filename: file.name,
+      size: file.size,
+      uploaded: new Date().toISOString(),
+      downloadUrl,
+    })
+  }
 
-	async function deleteUpload(key: string) {
-		if (!confirm('Delete this file? The link will stop working.')) return;
-		const res = await fetch('/api/delete', {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ key })
-		});
-		if (res.ok) {
-			recentUploads = recentUploads.filter((u) => u.key !== key);
-		}
-	}
+  async function uploadEntry(entry: FileEntry) {
+    updateEntry(entry.id, { status: 'uploading', progress: 0, startedAt: performance.now() })
+    try {
+      if (entry.file.size <= SINGLE_PUT_MAX) {
+        await uploadSingle(entry)
+      } else {
+        await uploadMultipart(entry)
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unknown error'
+      updateEntry(entry.id, { status: 'error', error: msg })
 
-	function fmt(bytes: number): string {
-		if (bytes < 1024) return `${bytes} B`;
-		if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
-		if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
-		return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
-	}
+      const current = files.find(f => f.id === entry.id)
+      if (current?._key && current?._uploadId) {
+        fetch('/api/abort-multipart', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key: current._key, uploadId: current._uploadId }),
+        }).catch(() => {})
+      }
+    }
+  }
+
+  function addFiles(incoming: File[]) {
+    const valid: FileEntry[] = []
+    for (const f of incoming) {
+      if (f.size > TOTAL_MAX) {
+        alert(`${f.name} exceeds the 100 GB limit.`)
+        continue
+      }
+      valid.push(makeEntry(f))
+    }
+    files = [...valid, ...files]
+    valid.forEach(e => uploadEntry(e))
+  }
+
+  function onDragOver(e: DragEvent) {
+    e.preventDefault()
+    dragging = true
+  }
+  function onDragLeave() {
+    dragging = false
+  }
+  function onDrop(e: DragEvent) {
+    e.preventDefault()
+    dragging = false
+    const dropped = Array.from(e.dataTransfer?.files ?? [])
+    if (dropped.length) addFiles(dropped)
+  }
+  function onFileInput(e: Event) {
+    const target = e.target as HTMLInputElement
+    const chosen = Array.from(target.files ?? [])
+    if (chosen.length) addFiles(chosen)
+    target.value = ''
+  }
+
+  function removeEntry(id: string) {
+    files = files.filter(f => f.id !== id)
+  }
+
+  function copyRecent(item: RecentItem) {
+    navigator.clipboard?.writeText(item.downloadUrl).catch(() => {})
+    copiedId = item.id
+    if (copyTimer) clearTimeout(copyTimer)
+    copyTimer = setTimeout(() => {
+      copiedId = null
+    }, COPIED_MS)
+  }
+
+  async function deleteUpload(item: RecentItem) {
+    if (!confirm('Delete this file? The link will stop working.')) return
+    const res = await fetch('/api/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: item.key }),
+    })
+    if (res.ok) {
+      recentUploads = recentUploads.filter(u => u.key !== item.key)
+    }
+  }
+
+  let activeCount = $derived(
+    files.filter(e => e.status === 'uploading' || e.status === 'queued').length,
+  )
+  let totalBytes = $derived(files.reduce((s, e) => s + e.file.size, 0))
+  let sentBytes = $derived(files.reduce((s, e) => s + e.uploadedBytes, 0))
 </script>
 
 <svelte:head>
-	<title>Flareshare — Upload</title>
+  <title>Flareshare — Upload</title>
 </svelte:head>
 
-<main>
-	<header>
-		<h1>Flareshare</h1>
-		<form method="POST" action="/auth/logout">
-			<button type="submit">Sign out</button>
-		</form>
-	</header>
+<div class="app">
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a
+        class="wordmark"
+        href="/upload"
+        aria-label="Flareshare home"
+      >
+        <span class="wm-dot"></span>
+        <span class="wm-text">Flareshare</span>
+      </a>
+      <span></span>
+      <div class="topright">
+        <form
+          method="POST"
+          action="/auth/logout"
+        >
+          <button
+            type="submit"
+            class="logout">Sign out</button
+          >
+        </form>
+      </div>
+    </div>
+  </header>
 
-	<div
-		class="zone"
-		class:dragging
-		ondragover={onDragOver}
-		ondragleave={onDragLeave}
-		ondrop={onDrop}
-		role="region"
-		aria-label="File upload area"
-	>
-		<div class="zone-icon" aria-hidden="true">⬆</div>
-		<p>Drag files here, or <button type="button" class="browse-link" onclick={() => fileInput.click()}>browse</button></p>
-		<p class="hint">Up to 100 GB per file · Links expire in 7 days</p>
-		<input
-			bind:this={fileInput}
-			type="file"
-			multiple
-			style="display:none"
-			onchange={onFileInput}
-		/>
-	</div>
+  <main class="view view-upload">
+    <div
+      class="dropzone"
+      class:drag={dragging}
+      role="button"
+      tabindex="0"
+      ondragover={onDragOver}
+      ondragleave={onDragLeave}
+      ondrop={onDrop}
+      onclick={() => fileInput.click()}
+      onkeydown={e => {
+        if (e.key === 'Enter' || e.key === ' ') fileInput.click()
+      }}
+    >
+      <span class="dz-label">
+        {#if dragging}
+          Release to upload
+        {:else}
+          Drop a file or <span class="u">browse</span>
+        {/if}
+      </span>
+      <span class="dz-specs mono dim">
+        <span>up to 100 GB</span>
+        <span class="dz-dot">·</span>
+        <span>expires in 7 days</span>
+      </span>
+      <input
+        bind:this={fileInput}
+        type="file"
+        multiple
+        hidden
+        onchange={onFileInput}
+      />
+    </div>
 
-	<section class="recent">
-		<h2>Recent uploads</h2>
-		{#if files.length === 0 && recentUploads.length === 0}
-			<p class="hint">No uploads yet.</p>
-		{:else}
-			<ul class="file-list">
-				{#each files as f (f.id)}
-					<li class="file-item status-{f.status}">
-						<div class="file-meta">
-							<span class="file-name">{f.file.name}</span>
-							<span class="file-size">{fmt(f.file.size)}</span>
-						</div>
+    {#if files.length > 0}
+      <section class="files">
+        <div class="section-head">
+          <h3 class="section-title mono">
+            Transferring
+            <span class="section-count mono dim"> · {files.length}</span>
+          </h3>
+          <span class="section-tag mono dim">
+            {fmt(sentBytes)} / {fmt(totalBytes)}
+            {#if activeCount > 0}
+              · <span class="live-dot"></span>{activeCount} active
+            {/if}
+          </span>
+        </div>
+        <ul class="file-list">
+          {#each files as e (e.id)}
+            {@const dotClass =
+              e.status === 'done'
+                ? 'on'
+                : e.status === 'error'
+                  ? 'err'
+                  : e.status === 'uploading'
+                    ? 'live'
+                    : ''}
+            {@const statusLabel =
+              e.status === 'queued'
+                ? 'queued'
+                : e.status === 'uploading'
+                  ? 'transferring'
+                  : e.status === 'done'
+                    ? 'ready'
+                    : e.status === 'error'
+                      ? 'failed'
+                      : e.status}
+            <li class="row row-{e.status}">
+              <div class="row-line">
+                <div class="row-name">
+                  <span class="row-dot {dotClass}"></span>
+                  <span class="row-fname mono">{e.file.name}</span>
+                  <span class="row-size mono dim">{fmt(e.file.size)}</span>
+                </div>
+                <div class="row-meta mono">
+                  {#if e.status === 'uploading'}
+                    <span>{fmtSpeed(e.speed)}</span>
+                    <span class="dot-sep">·</span>
+                    <span>{fmtEta(e.eta)}</span>
+                    <span class="dot-sep">·</span>
+                    <span class="status-tag">{statusLabel}</span>
+                  {:else if e.status === 'queued'}
+                    <span class="status-tag">{statusLabel}</span>
+                  {:else if e.status === 'done'}
+                    <span class="status-tag ok">{statusLabel}</span>
+                  {:else if e.status === 'error'}
+                    <span class="status-tag err">{statusLabel}</span>
+                  {/if}
+                  <button
+                    class="row-x"
+                    onclick={() => removeEntry(e.id)}
+                    aria-label="Remove"
+                  >
+                    <svg
+                      width="11"
+                      height="11"
+                      viewBox="0 0 13 13"
+                    >
+                      <path
+                        d="M3 3l7 7M10 3l-7 7"
+                        stroke="currentColor"
+                        stroke-width="1.2"
+                      />
+                    </svg>
+                  </button>
+                </div>
+              </div>
 
-						{#if f.status === 'uploading'}
-							<div class="progress-bar">
-								<div class="progress-fill" style="width:{f.progress}%"></div>
-							</div>
-							<span class="status-text">{f.progress}%</span>
-						{:else if f.status === 'done'}
-							<div class="done-row">
-								<a href={f.downloadUrl} class="download-link">{f.downloadUrl}</a>
-								<button type="button" onclick={() => copyLink(f.downloadUrl)}>Copy</button>
-								<span class="expiry">expires in 7 days</span>
-							</div>
-						{:else if f.status === 'error'}
-							<span class="status-text error">{f.error}</span>
-						{:else if f.status === 'queued'}
-							<span class="status-text">Queued…</span>
-						{/if}
-					</li>
-				{/each}
-				{#each recentUploads as u (u.id)}
-					<li class="file-item">
-						<div class="file-meta">
-							<span class="file-name">{u.filename}</span>
-							<span class="file-size">{fmt(u.size)}</span>
-							<span class="file-date">{new Date(u.uploaded).toLocaleString()}</span>
-						</div>
-						<div class="done-row">
-							<a href={u.downloadUrl} class="download-link">{u.downloadUrl}</a>
-							<button type="button" onclick={() => copyLink(u.downloadUrl)}>Copy</button>
-							<button type="button" class="delete-btn" onclick={() => deleteUpload(u.key)}>Delete</button>
-						</div>
-					</li>
-				{/each}
-			</ul>
-		{/if}
-	</section>
-</main>
+              {#if e.status === 'uploading'}
+                <div class="row-progress">
+                  <div class="bar">
+                    <div
+                      class="bar-fill"
+                      style="width:{e.progress}%"
+                    ></div>
+                  </div>
+                  <span class="bar-pct mono">{String(e.progress).padStart(3, '0')}%</span>
+                </div>
+              {/if}
+
+              {#if e.status === 'error'}
+                <div class="row-link">
+                  <span class="mono err-text">! {e.error}</span>
+                </div>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      </section>
+    {/if}
+
+    <section class="recent">
+      <div class="section-head">
+        <h3 class="section-title mono">Recent transfers</h3>
+        <span class="section-tag mono dim">
+          {recentUploads.length} items · auto-purged
+        </span>
+      </div>
+      {#if recentUploads.length === 0}
+        <p class="empty mono dim">No transfers yet.</p>
+      {:else}
+        <ul class="recent-list">
+          {#each recentUploads as r (r.id)}
+            {@const isCopied = copiedId === r.id || r.justCopied}
+            <li
+              class="rec-row"
+              class:is-copied={isCopied}
+            >
+              <div
+                class="rec-name-wrap"
+                role="button"
+                tabindex="0"
+                onclick={() => copyRecent(r)}
+                onkeydown={e => {
+                  if (e.key === 'Enter' || e.key === ' ') copyRecent(r)
+                }}
+              >
+                <span class="rec-name mono">{r.filename}</span>
+
+                <span
+                  class="rec-copy"
+                  aria-label="Copy link"
+                >
+                  {#if isCopied}
+                    <svg
+                      width="12"
+                      height="12"
+                      viewBox="0 0 13 13"
+                    >
+                      <path
+                        d="M2.5 7l3 3 5-6"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        fill="none"
+                        stroke-linecap="square"
+                      />
+                    </svg>
+                    <span class="rec-copy-label">link copied</span>
+                  {:else}
+                    <svg
+                      width="12"
+                      height="12"
+                      viewBox="0 0 13 13"
+                      fill="none"
+                    >
+                      <rect
+                        x="3.5"
+                        y="3.5"
+                        width="7"
+                        height="7"
+                        stroke="currentColor"
+                        stroke-width="1.1"
+                      />
+                      <path
+                        d="M2 9 V2 H9"
+                        stroke="currentColor"
+                        stroke-width="1.1"
+                      />
+                    </svg>
+                    <span class="rec-id mono">{r.id}</span>
+                  {/if}
+                </span>
+              </div>
+              <span class="rec-size mono dim">{fmt(r.size)}</span>
+              <span class="rec-ts mono dim">{timeAgo(r.uploaded)}</span>
+              <span class="rec-exp mono">
+                <svg
+                  width="10"
+                  height="10"
+                  viewBox="0 0 12 12"
+                  fill="none"
+                >
+                  <rect
+                    x="2.5"
+                    y="5.5"
+                    width="7"
+                    height="5"
+                    stroke="currentColor"
+                    stroke-width="1.1"
+                  />
+                  <path
+                    d="M4 5.5V4a2 2 0 014 0v1.5"
+                    stroke="currentColor"
+                    stroke-width="1.1"
+                  />
+                </svg>
+                {expiresIn(r.uploaded)}
+              </span>
+              <button
+                class="rec-del mono"
+                onclick={() => deleteUpload(r)}
+                aria-label="Delete"
+              >
+                <svg
+                  width="10"
+                  height="10"
+                  viewBox="0 0 13 13"
+                >
+                  <path
+                    d="M3 3l7 7M10 3l-7 7"
+                    stroke="currentColor"
+                    stroke-width="1.2"
+                  />
+                </svg>
+              </button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </section>
+  </main>
+
+  <footer class="footer mono">
+    <div class="footer-inner">
+      <div class="f-col">
+        <span class="dim">© 2026</span>
+        <span>Flareshare</span>
+        <span class="dim">— personal file transfer</span>
+      </div>
+    </div>
+  </footer>
+</div>
 
 <style>
-	main {
-		max-width: 740px;
-		margin: 0 auto;
-		padding: 2rem 1.25rem 4rem;
-	}
+  .app {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    color: var(--ink);
+  }
 
-	header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		margin-bottom: 2rem;
-		padding-bottom: 1.25rem;
-		border-bottom: 1px solid var(--border);
-	}
+  /* ============ TOPBAR ============ */
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: color-mix(in srgb, var(--bg) 92%, transparent);
+    backdrop-filter: saturate(140%) blur(8px);
+    border-bottom: 1px solid var(--hairline);
+  }
+  .topbar-inner {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 14px 32px;
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    gap: 24px;
+  }
+  .wordmark {
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 15px;
+    letter-spacing: -0.02em;
+    font-weight: 600;
+  }
+  .wm-dot {
+    width: 9px;
+    height: 9px;
+    background: var(--ink);
+    border-radius: 50%;
+    display: inline-block;
+  }
+  .wm-text {
+    font-feature-settings: 'ss01';
+  }
+  .topright {
+    justify-self: end;
+    font-size: 12px;
+    color: var(--muted);
+    display: inline-flex;
+    align-items: center;
+    gap: 14px;
+    letter-spacing: 0.01em;
+  }
+  .logout {
+    font-size: 12px;
+    color: var(--muted);
+    letter-spacing: 0.01em;
+    transition: color 0.12s;
+  }
+  .logout:hover {
+    color: var(--ink);
+  }
 
-	h1 {
-		margin: 0;
-		font-size: 1.25rem;
-		font-weight: 700;
-		letter-spacing: -0.02em;
-	}
+  /* ============ VIEW ============ */
+  .view {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 64px 32px 96px;
+    width: 100%;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 56px;
+  }
 
-	header button {
-		background: none;
-		border: none;
-		padding: 0.35rem 0.6rem;
-		color: var(--muted);
-		font-size: 0.875rem;
-		border-radius: var(--radius-sm);
-		transition: color 0.15s, background 0.15s;
-	}
+  /* ============ DROPZONE ============ */
+  .dropzone {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    border: 1px dashed var(--hairline-strong);
+    background: var(--bg);
+    padding: 44px 26px;
+    cursor: pointer;
+    transition:
+      background 0.18s,
+      border-color 0.18s;
+    text-align: center;
+  }
+  .dropzone:hover {
+    border-color: var(--ink);
+    background: var(--surface);
+  }
+  .dropzone.drag {
+    border-color: var(--ink);
+    border-style: solid;
+    background: color-mix(in srgb, var(--ink) 5%, var(--surface));
+  }
+  .dz-label {
+    font-size: 22px;
+    letter-spacing: -0.02em;
+    color: var(--ink);
+    font-weight: 500;
+  }
+  .dz-label .u {
+    font-style: italic;
+    font-weight: 400;
+    border-bottom: 1.5px solid var(--ink);
+    padding-bottom: 1px;
+  }
+  .dz-specs {
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .dz-dot {
+    color: var(--muted-2);
+  }
 
-	header button:hover {
-		color: var(--text);
-		background: var(--surface);
-	}
+  /* ============ SECTION HEADS ============ */
+  .section-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 14px;
+    gap: 16px;
+  }
+  .section-title {
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink);
+    font-weight: 500;
+  }
+  .section-count {
+    font-weight: 400;
+  }
+  .section-tag {
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .live-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--signal);
+    display: inline-block;
+    margin-right: 4px;
+    animation: drop-pulse 1.4s ease-in-out infinite;
+  }
 
-	/* --- Upload zone --- */
-	.zone {
-		border: 1px solid var(--border);
-		border-radius: var(--radius);
-		padding: 3.5rem 1.5rem;
-		text-align: center;
-		background: var(--surface);
-		transition: border-color 0.15s, background 0.15s;
-		cursor: default;
-	}
+  /* ============ FILE LIST / ROW ============ */
+  .file-list {
+    display: flex;
+    flex-direction: column;
+  }
+  .row {
+    border-top: 1px solid var(--hairline);
+    padding: 18px 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .row:last-child {
+    border-bottom: 1px solid var(--hairline);
+  }
+  .row-line {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+  }
+  .row-name {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    min-width: 0;
+    flex: 1;
+  }
+  .row-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--hairline-strong);
+    flex-shrink: 0;
+    align-self: center;
+  }
+  .row-dot.live {
+    background: var(--accent);
+    animation: drop-blink 1.1s ease-in-out infinite;
+  }
+  .row-dot.on {
+    background: var(--signal);
+  }
+  .row-dot.err {
+    background: var(--warn);
+  }
+  .row-fname {
+    font-size: 13.5px;
+    color: var(--ink);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    letter-spacing: -0.01em;
+  }
+  .row-size {
+    font-size: 11.5px;
+    color: var(--muted);
+    flex-shrink: 0;
+  }
+  .row-meta {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 11.5px;
+    color: var(--muted);
+    flex-shrink: 0;
+  }
+  .dot-sep {
+    color: var(--muted-2);
+  }
+  .status-tag {
+    color: var(--muted);
+    padding: 2px 6px;
+    border: 1px solid var(--hairline);
+    border-radius: 2px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-size: 10px;
+  }
+  .status-tag.ok {
+    color: var(--signal);
+    border-color: color-mix(in srgb, var(--signal) 35%, var(--hairline));
+  }
+  .status-tag.err {
+    color: var(--warn);
+    border-color: color-mix(in srgb, var(--warn) 40%, var(--hairline));
+  }
+  .row-x {
+    width: 22px;
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted-2);
+    border-radius: 2px;
+    transition:
+      color 0.12s,
+      background 0.12s;
+  }
+  .row-x:hover {
+    color: var(--ink);
+    background: var(--surface);
+  }
 
-	.zone:hover {
-		border-color: #a1a1aa;
-	}
+  .row-progress {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 12px;
+    align-items: center;
+  }
+  .bar {
+    height: 3px;
+    background: var(--hairline);
+    overflow: hidden;
+    position: relative;
+  }
+  .bar-fill {
+    height: 100%;
+    background: var(--ink);
+    transition: width 0.18s linear;
+  }
+  .bar-pct {
+    font-size: 11px;
+    color: var(--ink);
+    letter-spacing: 0.02em;
+    font-variant-numeric: tabular-nums;
+    min-width: 36px;
+    text-align: right;
+  }
 
-	.zone.dragging {
-		border-color: var(--border-focus);
-		background: #eff6ff;
-	}
+  .row-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 12px;
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    font-size: 12.5px;
+  }
 
-	.zone-icon {
-		font-size: 1.75rem;
-		margin-bottom: 0.75rem;
-		opacity: 0.4;
-	}
+  /* ============ RECENT ============ */
+  .recent-list {
+    display: flex;
+    flex-direction: column;
+  }
+  .rec-row {
+    display: grid;
+    grid-template-columns: 1fr 90px 110px 100px 24px;
+    align-items: center;
+    gap: 16px;
+    padding: 14px 4px;
+    border-top: 1px solid var(--hairline);
+    font-size: 12.5px;
+  }
+  .rec-row:last-child {
+    border-bottom: 1px solid var(--hairline);
+  }
+  .rec-row:hover .rec-del {
+    opacity: 1;
+  }
+  .rec-name-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    cursor: pointer;
+  }
+  .rec-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    color: var(--ink);
+    transition: color 0.12s;
+    font-size: 12.5px;
+  }
+  .rec-id {
+    opacity: 0;
+    transition: opacity 0.12s;
+    color: var(--muted) !important;
+  }
+  .rec-copy {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--muted-2);
+    flex-shrink: 0;
+    font-size: 11px;
+    letter-spacing: 0.02em;
+    transition: color 0.12s;
+  }
+  .rec-copy-label {
+    font-family: 'Geist Mono', ui-monospace, monospace;
+  }
+  .rec-name-wrap:hover .rec-name {
+    color: var(--accent);
+  }
+  .rec-name-wrap:hover .rec-copy {
+    color: var(--accent);
+  }
+  .rec-name-wrap:hover .rec-id {
+    opacity: 1;
+  }
+  .rec-row.is-copied .rec-name {
+    color: var(--signal);
+  }
+  .rec-row.is-copied .rec-copy {
+    color: var(--signal);
+  }
+  .rec-size,
+  .rec-ts {
+    font-size: 11.5px;
+  }
+  .rec-exp {
+    font-size: 11px;
+    color: var(--muted);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    justify-self: end;
+  }
+  .rec-del {
+    width: 22px;
+    height: 22px;
+    color: var(--muted-2);
+    opacity: 0;
+    justify-self: end;
+    transition:
+      opacity 0.12s,
+      color 0.12s;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .rec-del:hover {
+    color: var(--warn);
+  }
+  .empty {
+    font-size: 12px;
+    padding: 12px 4px;
+    border-top: 1px solid var(--hairline);
+    border-bottom: 1px solid var(--hairline);
+  }
 
-	.zone p {
-		margin: 0;
-		color: var(--text);
-		font-size: 0.95rem;
-	}
+  /* ============ FOOTER ============ */
+  .footer {
+    border-top: 1px solid var(--hairline);
+    padding: 18px 0;
+    margin-top: auto;
+  }
+  .footer-inner {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 0 32px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11.5px;
+    color: var(--muted);
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .f-col {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
 
-	.browse-link {
-		background: none;
-		border: none;
-		padding: 0;
-		color: var(--accent);
-		text-decoration: underline;
-		text-underline-offset: 2px;
-		font-size: inherit;
-	}
-
-	.browse-link:hover {
-		color: var(--accent-hover);
-	}
-
-	.hint {
-		color: var(--muted);
-		font-size: 0.8rem;
-		margin: 0.4rem 0 0;
-	}
-
-	/* --- File list --- */
-	.file-list {
-		list-style: none;
-		padding: 0;
-		margin-top: 1.25rem;
-		display: flex;
-		flex-direction: column;
-		gap: 0.5rem;
-	}
-
-	.file-item {
-		border: 1px solid var(--border);
-		border-radius: var(--radius);
-		padding: 1rem 1.25rem;
-		box-shadow: var(--shadow-sm);
-		background: var(--bg);
-	}
-
-	.file-meta {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.5rem 1rem;
-		align-items: baseline;
-		margin-bottom: 0.5rem;
-	}
-
-	.file-name {
-		font-weight: 600;
-		word-break: break-all;
-		font-size: 0.9rem;
-	}
-
-	.file-size {
-		color: var(--muted);
-		font-size: 0.8rem;
-		white-space: nowrap;
-	}
-
-	.file-date {
-		color: var(--muted);
-		font-size: 0.78rem;
-		white-space: nowrap;
-		opacity: 0.8;
-	}
-
-	/* --- Progress bar --- */
-	.progress-bar {
-		height: 8px;
-		background: var(--border);
-		border-radius: 999px;
-		overflow: hidden;
-		margin-bottom: 0.35rem;
-	}
-
-	.progress-fill {
-		height: 100%;
-		background: var(--accent);
-		transition: width 0.25s ease;
-		border-radius: 999px;
-	}
-
-	/* --- Status & actions --- */
-	.done-row {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-		flex-wrap: wrap;
-	}
-
-	.download-link {
-		font-size: 0.82rem;
-		color: var(--muted);
-		text-decoration: none;
-		min-width: 0;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		flex: 1;
-	}
-
-	.download-link:hover {
-		color: var(--accent);
-	}
-
-	.expiry {
-		font-size: 0.78rem;
-		color: var(--muted);
-		opacity: 0.7;
-		white-space: nowrap;
-	}
-
-	.status-text {
-		font-size: 0.82rem;
-		color: var(--muted);
-	}
-
-	.status-text.error {
-		color: var(--error);
-	}
-
-	.status-error {
-		border-color: #fca5a5;
-	}
-
-	.status-done {
-		border-color: #86efac;
-	}
-
-	/* --- Buttons in done row --- */
-	button {
-		background: none;
-		border: none;
-		padding: 0;
-	}
-
-	.done-row button {
-		font-size: 0.8rem;
-		font-weight: 500;
-		padding: 0.3rem 0.7rem;
-		border-radius: 999px;
-		white-space: nowrap;
-		transition: background 0.15s, color 0.15s;
-	}
-
-	.done-row button:not(.delete-btn) {
-		background: var(--accent);
-		color: #fff;
-	}
-
-	.done-row button:not(.delete-btn):hover {
-		background: var(--accent-hover);
-	}
-
-	.delete-btn {
-		color: var(--muted);
-	}
-
-	.delete-btn:hover {
-		color: var(--error);
-	}
-
-	/* --- Recent section --- */
-	.recent {
-		margin-top: 2.5rem;
-	}
-
-	.recent h2 {
-		font-size: 0.7rem;
-		font-weight: 600;
-		letter-spacing: 0.08em;
-		text-transform: uppercase;
-		color: var(--muted);
-		margin: 0 0 1rem;
-	}
+  /* ============ RESPONSIVE ============ */
+  @media (max-width: 760px) {
+    .topbar-inner {
+      grid-template-columns: 1fr auto;
+      padding: 12px 18px;
+    }
+    .view {
+      padding: 32px 18px 64px;
+      gap: 36px;
+    }
+    .dropzone {
+      padding: 18px 16px;
+      gap: 12px;
+    }
+    .dz-label {
+      font-size: 15px;
+    }
+    .metastrip {
+      grid-template-columns: repeat(2, 1fr);
+    }
+    .meta:nth-child(2) {
+      border-right: none;
+    }
+    .meta:nth-child(-n + 2) {
+      border-bottom: 1px solid var(--hairline);
+    }
+    .row-line {
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 8px;
+    }
+    .row-meta {
+      font-size: 11px;
+    }
+    .rec-row {
+      grid-template-columns: 1fr;
+      gap: 6px 10px;
+      padding: 12px 0;
+    }
+    .rec-row .rec-size,
+    .rec-row .rec-ts,
+    .rec-row .rec-exp,
+    .rec-row .rec-del {
+      display: none;
+    }
+    .footer-inner {
+      padding: 0 18px;
+    }
+  }
 </style>
