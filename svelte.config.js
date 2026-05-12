@@ -11,7 +11,8 @@ const config = {
 			directives: {
 				'default-src': ['self'],
 				'script-src': ['self'],
-				'style-src': ['self', 'unsafe-inline'],
+				'style-src': ['self', 'unsafe-inline', 'https://fonts.googleapis.com'],
+				'font-src': ['self', 'https://fonts.gstatic.com'],
 				'connect-src': ['self', 'https://*.r2.cloudflarestorage.com'],
 				'frame-ancestors': ['none'],
 				'base-uri': ['self']
