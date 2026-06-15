@@ -21,7 +21,7 @@ export const GET: RequestHandler = async ({ params, platform }) => {
 		return new Response('Not found', { status: 404 });
 	}
 
-	const filename = obj.key.slice(id.length + 1);
+	const filename = obj.key.split('/').at(-1) ?? '';
 	const encodedKey = obj.key.split('/').map(encodeURIComponent).join('/');
 	const fileRes = await client.fetch(
 		`${env.R2_ENDPOINT}/${env.R2_BUCKET}/${encodedKey}`,

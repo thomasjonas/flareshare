@@ -1,7 +1,8 @@
 import type { RequestHandler } from './$types';
 import { makeClient, createMultipart, presignUploadPart } from '$lib/server/r2-sign';
 import { sanitiseFilename } from '$lib/server/filename';
-import { newId } from '$lib/server/ids';
+import { newId, newFileId } from '$lib/server/ids';
+import { parseBundleId, bundleMemberKey } from '$lib/server/bundle-key';
 
 const MAX_TOTAL = 100 * 1024 * 1024 * 1024; // 100 GB
 const MIN_PART = 5 * 1024 * 1024; // 5 MB (S3 minimum, except last part)
@@ -12,7 +13,10 @@ export const POST: RequestHandler = async ({ request, platform, url }) => {
 	const body = await request.json().catch(() => null);
 	if (!body) return new Response('Invalid JSON', { status: 400 });
 
-	const { filename, size, contentType, partSize, partCount } = body as Record<string, unknown>;
+	const { filename, size, contentType, partSize, partCount, bundleId: rawBundleId } = body as Record<
+		string,
+		unknown
+	>;
 
 	if (typeof size !== 'number' || size <= 0 || size > MAX_TOTAL) {
 		return new Response('Invalid size (max 100 GB)', { status: 400 });
@@ -34,10 +38,17 @@ export const POST: RequestHandler = async ({ request, platform, url }) => {
 	const safe = sanitiseFilename(filename);
 	if (!safe) return new Response('Invalid filename', { status: 400 });
 
+	let bundleId: string;
+	try {
+		bundleId = parseBundleId(rawBundleId) ?? newId();
+	} catch (err) {
+		return new Response(err instanceof Error ? err.message : 'Invalid bundleId', { status: 400 });
+	}
+
 	const safeCt = typeof contentType === 'string' ? contentType : 'application/octet-stream';
 
-	const id = newId();
-	const key = `${id}/${safe}`;
+	const fileId = newFileId();
+	const key = bundleMemberKey(bundleId, fileId, safe);
 	const client = makeClient(platform!.env);
 
 	const uploadId = await createMultipart(client, platform!.env, key, safeCt);
@@ -50,10 +61,12 @@ export const POST: RequestHandler = async ({ request, platform, url }) => {
 	}
 
 	return Response.json({
-		id,
+		id: bundleId,
+		bundleId,
+		fileId,
 		key,
 		uploadId,
 		parts,
-		downloadUrl: `${url.origin}/d/${id}`
+		downloadUrl: `${url.origin}/d/${bundleId}`
 	});
 };
