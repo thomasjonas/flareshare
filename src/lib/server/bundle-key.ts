@@ -21,6 +21,40 @@ export function parseBundleId(raw: unknown): string | null {
 }
 
 /**
+ * Resolves a delete-request body to a validated bundle id.
+ *
+ * Accepts either:
+ *   { id: string }  — new contract; id must be a valid 10-char bundle id.
+ *   { key: string } — legacy contract; id is derived as the first path segment.
+ *
+ * When both are present, `id` takes precedence.
+ * Throws a descriptive Error on invalid or missing input.
+ */
+export function resolveDeleteId(body: Record<string, unknown>): string {
+	const { id, key } = body;
+
+	if (id !== undefined) {
+		if (typeof id !== 'string' || !BUNDLE_ID_RE.test(id)) {
+			throw new Error('Invalid id — must be 10 URL-safe characters [A-Za-z0-9_-]');
+		}
+		return id;
+	}
+
+	if (key !== undefined) {
+		if (typeof key !== 'string') {
+			throw new Error('Invalid key — must be a string');
+		}
+		const firstSegment = key.split('/')[0];
+		if (!BUNDLE_ID_RE.test(firstSegment)) {
+			throw new Error('Invalid key — first path segment must be a valid 10-char bundle id');
+		}
+		return firstSegment;
+	}
+
+	throw new Error('Request body must include either "id" or "key"');
+}
+
+/**
  * Constructs the R2 object key for a bundle member.
  * Three-segment path keeps member keys one level deeper than {bundleId}/manifest.json,
  * preventing any collision with the reserved manifest key.

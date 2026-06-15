@@ -143,7 +143,8 @@ export interface S3Object {
 
 export async function listObjects(
 	client: AwsClient,
-	env: App.Platform['env']
+	env: App.Platform['env'],
+	prefix?: string
 ): Promise<S3Object[]> {
 	const results: S3Object[] = [];
 	let continuationToken: string | undefined;
@@ -152,6 +153,7 @@ export async function listObjects(
 		const url = new URL(`${env.R2_ENDPOINT}/${env.R2_BUCKET}`);
 		url.searchParams.set('list-type', '2');
 		url.searchParams.set('max-keys', '1000');
+		if (prefix) url.searchParams.set('prefix', prefix);
 		if (continuationToken) url.searchParams.set('continuation-token', continuationToken);
 
 		const res = await client.fetch(url.toString(), { method: 'GET' });
