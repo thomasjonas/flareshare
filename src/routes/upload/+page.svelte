@@ -1,5 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte'
+  import { nanoid } from 'nanoid'
+  import { crc32Stream, crc32Combine } from '$lib/crc32'
   import type { PageData } from './$types'
   import type { UploadItem } from './+page.server'
 
@@ -10,6 +12,7 @@
   const CONCURRENCY = 4
   const MAX_RETRIES = 3
   const COPIED_MS = 1800
+  const BUNDLE_MAX = 45 // 45-file cap per transfer
 
   // --- Types ---
   type FileStatus = 'queued' | 'uploading' | 'done' | 'error' | 'aborted'
@@ -19,13 +22,17 @@
     file: File
     status: FileStatus
     progress: number
-    downloadUrl: string
     error: string
     startedAt: number
     uploadedBytes: number
     speed: number // bytes/sec
     eta: number // seconds
-    _key?: string
+    // Bundle member metadata (populated after presign / on completion)
+    fileId?: string
+    key?: string
+    crc32?: string
+    order?: number
+    // Multipart abort tracking
     _uploadId?: string
   }
 
@@ -35,25 +42,31 @@
 
   // --- State ---
   let files: FileEntry[] = $state([])
+  let bundleId: string | null = $state(null)
+  let nextOrder = $state(0)
+  let title = $state('')
   let dragging = $state(false)
   let fileInput: HTMLInputElement
   let recentUploads: RecentItem[] = $state(untrack(() => data.uploads ?? []))
   let copiedId: string | null = $state(null)
   let copyTimer: ReturnType<typeof setTimeout> | null = null
 
+  // Map of FileEntry.id → in-flight XHR for single PUTs (enables abort)
+  const xhrMap = new Map<string, XMLHttpRequest>()
+
   // --- Helpers ---
-  function makeEntry(file: File): FileEntry {
+  function makeEntry(file: File, order: number): FileEntry {
     return {
       id: Math.random().toString(36).slice(2),
       file,
       status: 'queued',
       progress: 0,
-      downloadUrl: '',
       error: '',
       startedAt: 0,
       uploadedBytes: 0,
       speed: 0,
       eta: Infinity,
+      order,
     }
   }
 
@@ -103,7 +116,7 @@
     return `${days}d ${String(hours).padStart(2, '0')}h`
   }
 
-  // --- Upload helpers (unchanged from previous implementation) ---
+  // --- Upload helpers ---
   function putXhr(url: string, blob: Blob, contentType: string): Promise<string> {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest()
@@ -126,6 +139,7 @@
     blob: Blob,
     contentType: string,
     onProgress: (loaded: number) => void,
+    onXhr?: (xhr: XMLHttpRequest) => void,
   ): Promise<void> {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest()
@@ -139,6 +153,8 @@
         else reject(new Error(`PUT ${xhr.status}`))
       }
       xhr.onerror = () => reject(new Error('Network error'))
+      xhr.onabort = () => reject(new Error('Upload aborted'))
+      onXhr?.(xhr)
       xhr.send(blob)
     })
   }
@@ -169,67 +185,69 @@
     })
   }
 
-  function onCompleted(entryId: string, item: RecentItem) {
-    files = files.filter(f => f.id !== entryId)
-    const flagged: RecentItem = { ...item, justCopied: true }
-    recentUploads = [flagged, ...recentUploads]
-    navigator.clipboard?.writeText(item.downloadUrl).catch(() => {})
-    setTimeout(() => {
-      recentUploads = recentUploads.map(u =>
-        u.id === flagged.id ? { ...u, justCopied: false } : u,
-      )
-    }, COPIED_MS)
-  }
-
-  async function uploadSingle(entry: FileEntry) {
+  async function uploadSingle(entry: FileEntry, bId: string) {
     const { file } = entry
+    const ct = file.type || 'application/octet-stream'
+
     const res = await fetch('/api/presign-upload', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        bundleId: bId,
         filename: file.name,
         size: file.size,
-        contentType: file.type || 'application/octet-stream',
+        contentType: ct,
       }),
     })
     if (!res.ok) throw new Error(`presign-upload: ${await res.text()}`)
-    const { id, key, uploadUrl, downloadUrl } = await res.json()
+    const { fileId, key, uploadUrl } = await res.json()
 
-    await putXhrWithProgress(uploadUrl, file, file.type || 'application/octet-stream', loaded =>
-      tickProgress(entry, loaded, file.size),
-    )
+    // Store key now so removeEntry can abort-multipart if needed (not applicable
+    // for single, but harmless; key is also needed for T7 member metadata)
+    updateEntry(entry.id, { fileId, key })
 
-    onCompleted(entry.id, {
-      id,
-      key,
-      filename: file.name,
-      size: file.size,
-      uploaded: new Date().toISOString(),
-      downloadUrl,
-    })
+    // Run upload and CRC32 in parallel — Blob supports multiple independent readers
+    const [, crc32] = await Promise.all([
+      putXhrWithProgress(
+        uploadUrl,
+        file,
+        ct,
+        loaded => tickProgress(entry, loaded, file.size),
+        xhr => xhrMap.set(entry.id, xhr),
+      ),
+      crc32Stream(file),
+    ])
+    xhrMap.delete(entry.id)
+
+    // Stay in tray (status 'done') so T7 can gather member metadata
+    updateEntry(entry.id, { status: 'done', progress: 100, crc32 })
   }
 
-  async function uploadMultipart(entry: FileEntry) {
+  async function uploadMultipart(entry: FileEntry, bId: string) {
     const { file } = entry
+    const ct = file.type || 'application/octet-stream'
     const partCount = Math.ceil(file.size / PART_SIZE)
 
     const res = await fetch('/api/presign-multipart', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        bundleId: bId,
         filename: file.name,
         size: file.size,
-        contentType: file.type || 'application/octet-stream',
+        contentType: ct,
         partSize: PART_SIZE,
         partCount,
       }),
     })
     if (!res.ok) throw new Error(`presign-multipart: ${await res.text()}`)
-    const { key, uploadId, parts, downloadUrl } = await res.json()
+    const { fileId, key, uploadId, parts } = await res.json()
 
-    updateEntry(entry.id, { _key: key, _uploadId: uploadId })
+    updateEntry(entry.id, { fileId, key, _uploadId: uploadId })
 
     const completedParts: { PartNumber: number; ETag: string }[] = []
+    // Keyed by partNumber; populated as parts complete (out of order within workers)
+    const partCrcs = new Map<number, { crc: string; size: number }>()
     let uploadedBytes = 0
 
     const queue = [...parts] as { partNumber: number; url: string; size: number }[]
@@ -238,13 +256,29 @@
         const part = queue.shift()!
         const start = (part.partNumber - 1) * PART_SIZE
         const blob = file.slice(start, start + part.size)
-        const etag = await withRetry(() => putXhr(part.url, blob, 'application/octet-stream'))
+        // Upload + per-part CRC32 in parallel
+        const [etag, partCrc] = await Promise.all([
+          withRetry(() => putXhr(part.url, blob, 'application/octet-stream')),
+          crc32Stream(blob),
+        ])
         completedParts.push({ PartNumber: part.partNumber, ETag: etag.replace(/"/g, '') })
+        partCrcs.set(part.partNumber, { crc: partCrc, size: part.size })
         uploadedBytes += part.size
         tickProgress(entry, uploadedBytes, file.size)
       }
     })
     await Promise.all(workers)
+
+    // Fold part CRCs in ascending partNumber order.
+    // crc32Combine('00000000', c, len) === c, so starting from all-zeros is correct.
+    const sortedParts = (parts as { partNumber: number; size: number }[]).slice().sort(
+      (a, b) => a.partNumber - b.partNumber,
+    )
+    let crc32 = '00000000'
+    for (const { partNumber, size } of sortedParts) {
+      const info = partCrcs.get(partNumber)!
+      crc32 = crc32Combine(crc32, info.crc, size)
+    }
 
     const completeRes = await fetch('/api/complete-multipart', {
       method: 'POST',
@@ -253,51 +287,74 @@
     })
     if (!completeRes.ok) throw new Error(`complete-multipart: ${await completeRes.text()}`)
 
-    const mpId = key.split('/')[0]
-    onCompleted(entry.id, {
-      id: mpId,
-      key,
-      filename: file.name,
-      size: file.size,
-      uploaded: new Date().toISOString(),
-      downloadUrl,
-    })
+    // Stay in tray (status 'done') so T7 can gather member metadata
+    updateEntry(entry.id, { status: 'done', progress: 100, crc32 })
   }
 
-  async function uploadEntry(entry: FileEntry) {
+  async function uploadEntry(entry: FileEntry, bId: string) {
     updateEntry(entry.id, { status: 'uploading', progress: 0, startedAt: performance.now() })
     try {
       if (entry.file.size <= SINGLE_PUT_MAX) {
-        await uploadSingle(entry)
+        await uploadSingle(entry, bId)
       } else {
-        await uploadMultipart(entry)
+        await uploadMultipart(entry, bId)
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error'
-      updateEntry(entry.id, { status: 'error', error: msg })
+      xhrMap.delete(entry.id)
 
+      // Only update error state if the entry is still in the tray (not removed)
       const current = files.find(f => f.id === entry.id)
-      if (current?._key && current?._uploadId) {
-        fetch('/api/abort-multipart', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ key: current._key, uploadId: current._uploadId }),
-        }).catch(() => {})
+      if (current) {
+        updateEntry(entry.id, { status: 'error', error: msg })
+        // Clean up any orphaned multipart upload server-side
+        if (current.key && current._uploadId) {
+          fetch('/api/abort-multipart', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: current.key, uploadId: current._uploadId }),
+          }).catch(() => {})
+        }
       }
     }
   }
 
   function addFiles(incoming: File[]) {
+    // Enforce 45-file cap
+    const currentCount = files.length
+    if (currentCount >= BUNDLE_MAX) {
+      alert(`Transfers are limited to ${BUNDLE_MAX} files. No more files can be added to this transfer.`)
+      return
+    }
+    let filesToAdd = incoming
+    if (currentCount + incoming.length > BUNDLE_MAX) {
+      const canAdd = BUNDLE_MAX - currentCount
+      alert(
+        `Transfers are limited to ${BUNDLE_MAX} files. Only the first ${canAdd} file(s) will be added; the rest were skipped.`,
+      )
+      filesToAdd = incoming.slice(0, canAdd)
+    }
+
+    // Mint a fresh bundleId when the first file is added to an empty tray.
+    // The same bundleId is reused for every subsequent file in the same tray.
+    if (currentCount === 0) {
+      bundleId = nanoid(10)
+      nextOrder = 0
+    }
+    const bId = bundleId!
+
     const valid: FileEntry[] = []
-    for (const f of incoming) {
+    let orderIdx = nextOrder
+    for (const f of filesToAdd) {
       if (f.size > TOTAL_MAX) {
         alert(`${f.name} exceeds the 100 GB limit.`)
         continue
       }
-      valid.push(makeEntry(f))
+      valid.push(makeEntry(f, orderIdx++))
     }
-    files = [...valid, ...files]
-    valid.forEach(e => uploadEntry(e))
+    nextOrder = orderIdx
+    files = [...files, ...valid]
+    valid.forEach(e => uploadEntry(e, bId))
   }
 
   function onDragOver(e: DragEvent) {
@@ -321,7 +378,32 @@
   }
 
   function removeEntry(id: string) {
+    const entry = files.find(f => f.id === id)
+    if (entry) {
+      if (entry.status === 'uploading' || entry.status === 'queued') {
+        // Single PUT: abort the in-flight XHR
+        xhrMap.get(id)?.abort()
+        xhrMap.delete(id)
+        // Multipart: abort the server-side multipart upload session
+        if (entry.key && entry._uploadId) {
+          fetch('/api/abort-multipart', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: entry.key, uploadId: entry._uploadId }),
+          }).catch(() => {})
+        }
+      }
+      // For status 'done': the object is already stored in R2.
+      // We leave it as an orphan; the existing 7-day R2 lifecycle expiry reclaims it.
+      // (Calling /api/delete here would wipe all sibling members under the same bundleId.)
+    }
     files = files.filter(f => f.id !== id)
+    // Reset bundle state when the tray becomes empty so the next add mints a fresh bundleId
+    if (files.length === 0) {
+      bundleId = null
+      nextOrder = 0
+      title = ''
+    }
   }
 
   function copyRecent(item: RecentItem) {
@@ -400,11 +482,11 @@
         {#if dragging}
           Release to upload
         {:else}
-          Drop a file or <span class="u">browse</span>
+          Drop files or <span class="u">browse</span>
         {/if}
       </span>
       <span class="dz-specs mono dim">
-        <span>up to 100 GB</span>
+        <span>up to 45 files · 100 GB each</span>
         <span class="dz-dot">·</span>
         <span>expires in 7 days</span>
       </span>
@@ -512,6 +594,16 @@
             </li>
           {/each}
         </ul>
+
+        <div class="tray-footer">
+          <input
+            class="title-input mono"
+            type="text"
+            placeholder="Transfer title (optional)"
+            maxlength="200"
+            bind:value={title}
+          />
+        </div>
       </section>
     {/if}
 
@@ -946,6 +1038,29 @@
     background: var(--surface);
     border: 1px solid var(--hairline);
     font-size: 12.5px;
+  }
+
+  /* ============ TRAY FOOTER (title input) ============ */
+  .tray-footer {
+    margin-top: 20px;
+  }
+  .title-input {
+    width: 100%;
+    font-size: 12.5px;
+    letter-spacing: 0.01em;
+    padding: 9px 12px;
+    background: var(--bg);
+    border: 1px solid var(--hairline);
+    color: var(--ink);
+    outline: none;
+    transition: border-color 0.12s;
+    box-sizing: border-box;
+  }
+  .title-input:focus {
+    border-color: var(--ink);
+  }
+  .title-input::placeholder {
+    color: var(--muted-2);
   }
 
   /* ============ RECENT ============ */
