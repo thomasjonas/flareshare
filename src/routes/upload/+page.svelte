@@ -432,6 +432,89 @@
   )
   let totalBytes = $derived(files.reduce((s, e) => s + e.file.size, 0))
   let sentBytes = $derived(files.reduce((s, e) => s + e.uploadedBytes, 0))
+  // --- Finalize state ---
+  let finalizing = $state(false)
+  let finalizeError = $state('')
+  let finalizedUrl = $state('')
+  let finalizedCopied = $state(false)
+  let finalizedCopyTimer: ReturnType<typeof setTimeout> | null = null
+
+  let hasErrors = $derived(files.some(e => e.status === 'error'))
+  let allDone = $derived(files.length > 0 && files.every(e => e.status === 'done'))
+  let canFinalize = $derived(allDone && !finalizing)
+
+  async function finalizeBundle() {
+    if (!canFinalize || !bundleId) return
+
+    // Check every entry has the required metadata fields
+    const missingMeta = files.find(
+      e => !e.key || e.crc32 === undefined || e.order === undefined,
+    )
+    if (missingMeta) {
+      finalizeError = `"${missingMeta.file.name}" is missing upload metadata — try removing and re-adding it.`
+      return
+    }
+
+    finalizing = true
+    finalizeError = ''
+
+    const filesSorted = files.slice().sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+    const filePayload = filesSorted.map(e => ({
+      key: e.key!,
+      filename: e.file.name,
+      size: e.file.size,
+      crc32: e.crc32!,
+      order: e.order!,
+    }))
+
+    try {
+      const res = await fetch('/api/finalize-bundle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: bundleId,
+          title: title.trim() || undefined,
+          files: filePayload,
+        }),
+      })
+
+      if (res.status === 401) {
+        finalizeError = 'Session expired — please sign in again to create a link.'
+        return
+      }
+      if (!res.ok) {
+        finalizeError = await res.text()
+        return
+      }
+
+      const { downloadUrl } = await res.json()
+      finalizedUrl = downloadUrl
+
+      // Reset the tray so the next add starts a fresh transfer
+      files = []
+      bundleId = null
+      nextOrder = 0
+      title = ''
+    } catch (err) {
+      finalizeError = err instanceof Error ? err.message : 'Unknown error'
+    } finally {
+      finalizing = false
+    }
+  }
+
+  function copyFinalizedUrl() {
+    navigator.clipboard?.writeText(finalizedUrl).catch(() => {})
+    finalizedCopied = true
+    if (finalizedCopyTimer) clearTimeout(finalizedCopyTimer)
+    finalizedCopyTimer = setTimeout(() => {
+      finalizedCopied = false
+    }, COPIED_MS)
+  }
+
+  function dismissFinalized() {
+    finalizedUrl = ''
+    finalizedCopied = false
+  }
 </script>
 
 <svelte:head>
@@ -603,6 +686,74 @@
             maxlength="200"
             bind:value={title}
           />
+          <div class="tray-actions">
+            {#if hasErrors}
+              <span class="tray-hint mono err-text">Remove failed files to create a link.</span>
+            {:else if activeCount > 0}
+              <span class="tray-hint mono dim">Waiting for {activeCount} upload{activeCount === 1 ? '' : 's'}…</span>
+            {/if}
+            <button
+              class="create-link-btn mono"
+              onclick={finalizeBundle}
+              disabled={!canFinalize || hasErrors}
+              aria-label="Create transfer link"
+            >
+              {#if finalizing}
+                Creating link…
+              {:else if activeCount > 0}
+                Uploading…
+              {:else}
+                Create link
+              {/if}
+            </button>
+          </div>
+          {#if finalizeError}
+            <div class="tray-error mono">! {finalizeError}</div>
+          {/if}
+        </div>
+      </section>
+    {/if}
+
+    {#if finalizedUrl}
+      <section class="finalize-result">
+        <div class="section-head">
+          <h3 class="section-title mono">Transfer link</h3>
+          <span class="section-tag mono dim">Link ready — share with anyone</span>
+        </div>
+        <div
+          class="link-row"
+          class:link-copied={finalizedCopied}
+          role="button"
+          tabindex="0"
+          onclick={copyFinalizedUrl}
+          onkeydown={e => {
+            if (e.key === 'Enter' || e.key === ' ') copyFinalizedUrl()
+          }}
+        >
+          <span class="link-url mono">{finalizedUrl}</span>
+          <span class="link-copy mono">
+            {#if finalizedCopied}
+              <svg width="12" height="12" viewBox="0 0 13 13">
+                <path
+                  d="M2.5 7l3 3 5-6"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  fill="none"
+                  stroke-linecap="square"
+                />
+              </svg>
+              link copied
+            {:else}
+              <svg width="12" height="12" viewBox="0 0 13 13" fill="none">
+                <rect x="3.5" y="3.5" width="7" height="7" stroke="currentColor" stroke-width="1.1" />
+                <path d="M2 9 V2 H9" stroke="currentColor" stroke-width="1.1" />
+              </svg>
+              copy link
+            {/if}
+          </span>
+        </div>
+        <div class="link-dismiss">
+          <button class="dismiss-btn mono" onclick={dismissFinalized}>Start new transfer</button>
         </div>
       </section>
     {/if}
@@ -1040,9 +1191,12 @@
     font-size: 12.5px;
   }
 
-  /* ============ TRAY FOOTER (title input) ============ */
+  /* ============ TRAY FOOTER (title input + create link) ============ */
   .tray-footer {
     margin-top: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
   }
   .title-input {
     width: 100%;
@@ -1061,6 +1215,115 @@
   }
   .title-input::placeholder {
     color: var(--muted-2);
+  }
+  .tray-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .tray-hint {
+    font-size: 11.5px;
+    letter-spacing: 0.01em;
+    color: var(--muted);
+    flex: 1;
+  }
+  .create-link-btn {
+    font-size: 12.5px;
+    letter-spacing: 0.03em;
+    padding: 9px 20px;
+    border: 1px solid var(--ink);
+    background: var(--ink);
+    color: var(--bg);
+    cursor: pointer;
+    transition:
+      background 0.12s,
+      color 0.12s,
+      border-color 0.12s;
+    flex-shrink: 0;
+  }
+  .create-link-btn:hover:not(:disabled) {
+    background: var(--bg);
+    color: var(--ink);
+  }
+  .create-link-btn:disabled {
+    border-color: var(--hairline);
+    background: var(--surface);
+    color: var(--muted-2);
+    cursor: not-allowed;
+  }
+  .tray-error {
+    font-size: 11.5px;
+    color: var(--warn);
+    padding: 8px 12px;
+    border: 1px solid color-mix(in srgb, var(--warn) 40%, var(--hairline));
+    background: color-mix(in srgb, var(--warn) 6%, var(--bg));
+  }
+
+  /* ============ FINALIZE RESULT ============ */
+  .link-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 14px 16px;
+    border: 1px solid var(--hairline);
+    background: var(--surface);
+    cursor: pointer;
+    transition:
+      border-color 0.12s,
+      background 0.12s;
+  }
+  .link-row:hover {
+    border-color: var(--ink);
+    background: color-mix(in srgb, var(--ink) 4%, var(--surface));
+  }
+  .link-row.link-copied {
+    border-color: color-mix(in srgb, var(--signal) 40%, var(--hairline));
+    background: color-mix(in srgb, var(--signal) 6%, var(--surface));
+  }
+  .link-url {
+    font-size: 13px;
+    color: var(--ink);
+    letter-spacing: -0.01em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .link-copied .link-url {
+    color: var(--signal);
+  }
+  .link-copy {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    letter-spacing: 0.03em;
+    color: var(--muted);
+    flex-shrink: 0;
+    transition: color 0.12s;
+    text-transform: uppercase;
+  }
+  .link-row:hover .link-copy {
+    color: var(--ink);
+  }
+  .link-row.link-copied .link-copy {
+    color: var(--signal);
+  }
+  .link-dismiss {
+    margin-top: 10px;
+    display: flex;
+    justify-content: flex-end;
+  }
+  .dismiss-btn {
+    font-size: 11.5px;
+    letter-spacing: 0.02em;
+    color: var(--muted);
+    transition: color 0.12s;
+  }
+  .dismiss-btn:hover {
+    color: var(--ink);
   }
 
   /* ============ RECENT ============ */
