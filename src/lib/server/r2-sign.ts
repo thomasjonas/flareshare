@@ -109,6 +109,22 @@ export async function deleteObject(
 	if (!res.ok && res.status !== 404) throw new Error(`deleteObject ${res.status}: ${await res.text()}`);
 }
 
+export async function putObject(
+	client: AwsClient,
+	env: App.Platform['env'],
+	key: string,
+	body: string,
+	contentType: string
+): Promise<void> {
+	const url = objectUrl(env, key);
+	const res = await client.fetch(url, {
+		method: 'PUT',
+		body,
+		headers: { 'content-type': contentType }
+	});
+	if (!res.ok) throw new Error(`putObject ${res.status}: ${await res.text()}`);
+}
+
 export async function abortMultipart(
 	client: AwsClient,
 	env: App.Platform['env'],
