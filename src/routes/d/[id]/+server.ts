@@ -1,8 +1,63 @@
 import type { RequestHandler } from './$types';
+import type { AwsClient } from 'aws4fetch';
 import { contentDisposition } from '$lib/server/filename';
-import { makeClient, listObjects } from '$lib/server/r2-sign';
+import { makeClient, listObjects, getObject } from '$lib/server/r2-sign';
+import { zipStream, predictZipSize } from '$lib/server/zip';
+import type { Manifest } from '$lib/server/manifest';
+import { findLegacyObject } from '$lib/server/download-dispatch';
 
 const ID_RE = /^[A-Za-z0-9_-]{10}$/;
+
+const SECURITY_HEADERS = {
+	'X-Content-Type-Options': 'nosniff',
+	'Cache-Control': 'private, no-store',
+	'Referrer-Policy': 'no-referrer'
+} as const;
+
+/**
+ * Return a ReadableStream that lazily fetches the R2 object on first pull.
+ * "Lazy" here means the fetch is deferred until the stream consumer calls
+ * read() — the zipStream generator reads entries sequentially, so at most
+ * one subrequest is in flight at a time.
+ */
+function makeLazyR2Stream(
+	client: AwsClient,
+	env: App.Platform['env'],
+	key: string
+): ReadableStream<Uint8Array> {
+	let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+	let fetchStarted = false;
+
+	return new ReadableStream<Uint8Array>({
+		async pull(controller) {
+			if (!fetchStarted) {
+				fetchStarted = true;
+				const res = await getObject(client, env, key);
+				if (!res.ok || !res.body) {
+					// Headers are not yet sent — this error propagates through zipStream.
+					// If headers *were* already sent the client gets a truncated zip
+					// (accepted risk: see docs/BUNDLES.md "Accepted risks").
+					controller.error(new Error(`R2 GET failed for key "${key}": ${res.status}`));
+					return;
+				}
+				reader = res.body.getReader();
+			}
+
+			if (!reader) return;
+
+			const { value, done } = await reader.read();
+			if (done) {
+				reader.releaseLock();
+				controller.close();
+			} else if (value) {
+				controller.enqueue(value);
+			}
+		},
+		cancel() {
+			reader?.cancel();
+		}
+	});
+}
 
 export const GET: RequestHandler = async ({ params, platform }) => {
 	const { id } = params;
@@ -14,15 +69,103 @@ export const GET: RequestHandler = async ({ params, platform }) => {
 	const env = platform!.env;
 	const client = makeClient(env);
 
-	// Find the object key (we don't know the filename, only the id prefix).
-	const all = await listObjects(client, env);
-	const obj = all.find((o) => o.key.startsWith(`${id}/`));
-	if (!obj) {
+	// ── 1. Try the manifest ─────────────────────────────────────────────────
+	const manifestRes = await getObject(client, env, `${id}/manifest.json`);
+
+	if (manifestRes.ok) {
+		// Parse manifest defensively; treat malformed JSON as 404 to avoid
+		// leaking internals (this should never happen for a well-formed bundle
+		// because finalize-bundle validates and writes the manifest).
+		let manifest: Manifest;
+		try {
+			const parsed = (await manifestRes.json()) as unknown;
+			if (
+				typeof parsed !== 'object' ||
+				parsed === null ||
+				!Array.isArray((parsed as Record<string, unknown>).files)
+			) {
+				return new Response('Not found', { status: 404 });
+			}
+			manifest = parsed as Manifest;
+		} catch {
+			return new Response('Not found', { status: 404 });
+		}
+
+		if (manifest.files.length === 0) {
+			return new Response('Not found', { status: 404 });
+		}
+
+		// Sort by order ascending — MUST be the same for both predictZipSize and
+		// zipStream so their layouts agree exactly.
+		const files = manifest.files.slice().sort((a, b) => a.order - b.order);
+
+		// ── Single-file manifest: raw passthrough ────────────────────────────
+		if (files.length === 1) {
+			const member = files[0];
+			const memberRes = await getObject(client, env, member.key);
+			if (!memberRes.ok) {
+				return new Response('Not found', { status: 404 });
+			}
+			return new Response(memberRes.body, {
+				headers: {
+					'Content-Type': 'application/octet-stream',
+					'Content-Disposition': contentDisposition(member.filename),
+					// Raw passthrough: use live R2 Content-Length (correct here because
+					// we are NOT zipping; the encoder's declared-size constraint does
+					// not apply to raw passthrough).
+					'Content-Length':
+						memberRes.headers.get('Content-Length') ?? String(member.size),
+					...SECURITY_HEADERS
+				}
+			});
+		}
+
+		// ── Multi-file manifest: stream ZIP ──────────────────────────────────
+		// CRITICAL: use manifest `size` for predictZipSize / Content-Length, NEVER
+		// R2's live Content-Length.  The encoder lays out offsets from the declared
+		// size; a mismatch would corrupt the archive and break Content-Length.
+		const entries = files.map((member) => ({
+			name: member.filename,
+			size: member.size, // manifest size — single source of truth
+			crc32: member.crc32,
+			body: makeLazyR2Stream(client, env, member.key)
+		}));
+
+		const zipName = manifest.title || `flareshare-${id}.zip`;
+		const contentLength = predictZipSize(entries.map((e) => ({ name: e.name, size: e.size })));
+
+		return new Response(zipStream(entries), {
+			headers: {
+				'Content-Type': 'application/zip',
+				'Content-Disposition': contentDisposition(zipName),
+				'Content-Length': String(contentLength),
+				...SECURITY_HEADERS
+			}
+		});
+	}
+
+	// ── 2. Manifest absent — legacy fallback (verbatim existing logic) ───────
+	// Only reached when manifest.json returns 404. Any other R2 error → 404
+	// to avoid leaking internals.
+	if (manifestRes.status !== 404) {
 		return new Response('Not found', { status: 404 });
 	}
 
-	const filename = obj.key.split('/').at(-1) ?? '';
-	const encodedKey = obj.key.split('/').map(encodeURIComponent).join('/');
+	// List objects under the {id}/ prefix.  Filter to DIRECT children only
+	// (2-segment keys: {id}/{filename}).  A 3-segment key ({id}/{fileId}/{filename})
+	// means a pre-finalize bundle whose manifest was never written — we return 404
+	// rather than streaming a random member object.
+	const prefixObjects = await listObjects(client, env, `${id}/`);
+	const legacyObj = findLegacyObject(id, prefixObjects);
+
+	if (!legacyObj) {
+		return new Response('Not found', { status: 404 });
+	}
+
+	// Stream the single legacy object — this is the pre-bundle code path, kept
+	// verbatim so existing single-object share links continue to work.
+	const filename = legacyObj.key.split('/').at(-1) ?? '';
+	const encodedKey = legacyObj.key.split('/').map(encodeURIComponent).join('/');
 	const fileRes = await client.fetch(
 		`${env.R2_ENDPOINT}/${env.R2_BUCKET}/${encodedKey}`,
 		{ method: 'GET' }
@@ -35,10 +178,8 @@ export const GET: RequestHandler = async ({ params, platform }) => {
 		headers: {
 			'Content-Type': 'application/octet-stream',
 			'Content-Disposition': contentDisposition(filename),
-			'Content-Length': fileRes.headers.get('Content-Length') ?? String(obj.size),
-			'X-Content-Type-Options': 'nosniff',
-			'Cache-Control': 'private, no-store',
-			'Referrer-Policy': 'no-referrer'
+			'Content-Length': fileRes.headers.get('Content-Length') ?? String(legacyObj.size),
+			...SECURITY_HEADERS
 		}
 	});
 };

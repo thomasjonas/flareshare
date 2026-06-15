@@ -109,6 +109,19 @@ export async function deleteObject(
 	if (!res.ok && res.status !== 404) throw new Error(`deleteObject ${res.status}: ${await res.text()}`);
 }
 
+/**
+ * Perform a signed GET for a single R2 object and return the raw fetch
+ * Response. Callers must check `.ok` / `.status` before consuming `.body`.
+ */
+export async function getObject(
+	client: AwsClient,
+	env: App.Platform['env'],
+	key: string
+): Promise<Response> {
+	const url = objectUrl(env, key);
+	return client.fetch(url, { method: 'GET' });
+}
+
 export async function putObject(
 	client: AwsClient,
 	env: App.Platform['env'],
