@@ -3,7 +3,7 @@
   import { nanoid } from 'nanoid'
   import { crc32Stream, crc32Combine } from '$lib/crc32'
   import type { PageData } from './$types'
-  import type { UploadItem } from './+page.server'
+  import type { TransferRow } from './+page.server'
 
   // --- Constants ---
   const SINGLE_PUT_MAX = 5 * 1024 * 1024 * 1024 // 5 GB
@@ -36,7 +36,7 @@
     _uploadId?: string
   }
 
-  type RecentItem = UploadItem & { justCopied?: boolean }
+  type RecentItem = TransferRow & { justCopied?: boolean }
 
   let { data }: { data: PageData } = $props()
 
@@ -416,14 +416,14 @@
   }
 
   async function deleteUpload(item: RecentItem) {
-    if (!confirm('Delete this file? The link will stop working.')) return
+    if (!confirm('Delete this transfer? The download link will stop working.')) return
     const res = await fetch('/api/delete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key: item.key }),
+      body: JSON.stringify({ id: item.id }),
     })
     if (res.ok) {
-      recentUploads = recentUploads.filter(u => u.key !== item.key)
+      recentUploads = recentUploads.filter(u => u.id !== item.id)
     }
   }
 
@@ -784,7 +784,10 @@
                   if (e.key === 'Enter' || e.key === ' ') copyRecent(r)
                 }}
               >
-                <span class="rec-name mono">{r.filename}</span>
+                <span class="rec-name mono">{r.title}</span>
+                {#if r.kind === 'bundle'}
+                  <span class="rec-count mono dim">{r.fileCount} file{r.fileCount === 1 ? '' : 's'}</span>
+                {/if}
 
                 <span
                   class="rec-copy"
@@ -1361,6 +1364,15 @@
     color: var(--ink);
     transition: color 0.12s;
     font-size: 12.5px;
+  }
+  .rec-count {
+    font-size: 11px;
+    letter-spacing: 0.03em;
+    color: var(--muted);
+    flex-shrink: 0;
+    padding: 1px 5px;
+    border: 1px solid var(--hairline);
+    border-radius: 2px;
   }
   .rec-id {
     opacity: 0;

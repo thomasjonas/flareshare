@@ -4,7 +4,7 @@
  * Extracted here so they can be unit-tested without a Cloudflare runtime.
  */
 
-import type { Manifest } from './manifest.ts';
+import type { Manifest } from '$lib/server/manifest';
 
 export type DispatchKind = 'zip' | 'single' | 'legacy' | 'not-found';
 
