@@ -326,20 +326,53 @@ function endRecords(plan: Plan): Uint8Array {
 }
 
 /**
+ * Construct the archive's pass-through transform.
+ *
+ * CRITICAL: on the Workers runtime this MUST be an `IdentityTransformStream`
+ * (or `FixedLengthStream`), not a plain `TransformStream`. A plain
+ * `TransformStream` runs a JS transform callback for *every chunk* even when the
+ * transform is the identity — so member bytes still cross the JS boundary and
+ * CPU scales with archive size, tripping `exceededCpu` on large bundles. The
+ * identity transforms pass bytes through in the runtime without per-chunk JS.
+ *
+ * `FixedLengthStream(totalSize)` is preferred when available: it is the most
+ * optimized pass-through and additionally guarantees the body length. We fall
+ * back to `IdentityTransformStream`, then to `TransformStream` for non-Workers
+ * runtimes (e.g. the Node test suite), which is functionally correct there
+ * because those tests don't run under the Workers CPU limiter.
+ */
+function makeArchiveTransform(totalSize: number): {
+	readable: ReadableStream<Uint8Array>;
+	writable: WritableStream<Uint8Array>;
+} {
+	const g = globalThis as unknown as {
+		FixedLengthStream?: new (n: number) => {
+			readable: ReadableStream<Uint8Array>;
+			writable: WritableStream<Uint8Array>;
+		};
+		IdentityTransformStream?: new () => {
+			readable: ReadableStream<Uint8Array>;
+			writable: WritableStream<Uint8Array>;
+		};
+	};
+	if (typeof g.FixedLengthStream === 'function') return new g.FixedLengthStream(totalSize);
+	if (typeof g.IdentityTransformStream === 'function') return new g.IdentityTransformStream();
+	return new TransformStream<Uint8Array, Uint8Array>();
+}
+
+/**
  * Stream a STORE-mode ZIP of `entries`. Member bytes are piped through
  * untouched; the supplied `crc32` is injected into the headers. The emitted
  * length is exactly `predictZipSize(entries)`.
  *
- * Member bodies are `pipeTo`'d directly into the archive's writable rather than
- * being read chunk-by-chunk in JS: this lets the runtime copy R2 bytes natively
- * (≈0 CPU), matching the single-file passthrough path. Only the small ZIP
- * headers — which we must build — pass through JS. Pulling member bytes through
- * a JS generator/ReadableStream instead would make CPU scale with archive size
- * and blow the CPU limit on large bundles.
+ * Member bodies are `pipeTo`'d directly into an identity pass-through transform
+ * (see `makeArchiveTransform`) so the runtime copies R2 bytes natively (≈0 CPU),
+ * matching the single-file passthrough path. Only the small ZIP headers — which
+ * we must build — pass through JS.
  */
 export function zipStream(entries: ZipEntry[]): ReadableStream<Uint8Array> {
 	const plan = planLayout(entries, entries.map((e) => e.crc32));
-	const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+	const { readable, writable } = makeArchiveTransform(plan.totalSize);
 
 	void (async () => {
 		// `writer` holds the lock only while we write headers. We release it
