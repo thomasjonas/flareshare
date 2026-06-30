@@ -1,6 +1,6 @@
 import type { RequestHandler } from './$types';
 import type { AwsClient } from 'aws4fetch';
-import { contentDisposition } from '$lib/server/filename';
+import { contentDisposition, zipFilename } from '$lib/server/filename';
 import { makeClient, listObjects, getObject } from '$lib/server/r2-sign';
 import { zipStream, predictZipSize } from '$lib/server/zip';
 import type { Manifest } from '$lib/server/manifest';
@@ -108,7 +108,7 @@ export const GET: RequestHandler = async ({ params, platform }) => {
 			open: () => openR2Stream(client, env, member.key)
 		}));
 
-		const zipName = manifest.title || `flareshare-${id}.zip`;
+		const zipName = zipFilename(manifest.title, id);
 		const contentLength = predictZipSize(entries.map((e) => ({ name: e.name, size: e.size })));
 
 		return new Response(zipStream(entries), {
