@@ -1,6 +1,6 @@
 # Flareshare
 
-A minimal, single-user file drop built on SvelteKit and Cloudflare. Upload files up to 100 GB, share a link, files auto-expire after 7 days. GitHub OAuth restricts uploads to one account; downloads are public capability URLs — no sign-in required.
+A minimal, single-user file drop built on SvelteKit and Cloudflare. Upload files up to 100 GB, share a link, files auto-expire after 14 days. GitHub OAuth restricts uploads to one account; downloads are public capability URLs — no sign-in required.
 
 ## Features
 
@@ -9,7 +9,7 @@ A minimal, single-user file drop built on SvelteKit and Cloudflare. Upload files
 - Direct browser-to-R2 uploads — file bytes never pass through the Worker
 - Public download links with no authentication
 - Recent uploads list with copy-link and delete
-- 7-day auto-expiry via R2 lifecycle rules
+- 14-day auto-expiry via R2 lifecycle rules
 - GitHub OAuth gating — only your account can upload
 
 ## Stack
@@ -40,7 +40,7 @@ npm install
 
 ### 2. Create an R2 bucket
 
-In the Cloudflare dashboard, create a bucket (e.g. `transfer`) and add a lifecycle rule: **expire objects after 7 days**.
+In the Cloudflare dashboard, create a bucket (e.g. `transfer`) and add a lifecycle rule: **expire objects after 14 days**.
 
 Generate an R2 API token with **Object Read & Write** for that bucket.
 
@@ -80,7 +80,7 @@ The dev server runs at `http://localhost:5173`. Set the GitHub OAuth callback UR
 
 ## Cost
 
-R2 storage is ~$0.015/GB/month with zero egress charges. At this scale (single user, files auto-deleted after 7 days) the cost is effectively zero.
+R2 storage is ~$0.015/GB/month with zero egress charges. At this scale (single user, files auto-deleted after 14 days) the cost is effectively zero.
 
 ## License
 

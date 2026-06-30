@@ -13,6 +13,7 @@
   const MAX_RETRIES = 3
   const COPIED_MS = 1800
   const BUNDLE_MAX = 45 // 45-file cap per transfer
+  const EXPIRY_DAYS = 14 // matches the R2 lifecycle expiry rule
 
   // --- Types ---
   type FileStatus = 'queued' | 'uploading' | 'done' | 'error' | 'aborted'
@@ -108,8 +109,8 @@
 
   function expiresIn(iso: string): string {
     const t = Date.parse(iso)
-    if (isNaN(t)) return '7d 00h'
-    const ms = 7 * 86400 * 1000 - (Date.now() - t)
+    if (isNaN(t)) return `${EXPIRY_DAYS}d 00h`
+    const ms = EXPIRY_DAYS * 86400 * 1000 - (Date.now() - t)
     if (ms <= 0) return 'expired'
     const days = Math.floor(ms / 86400000)
     const hours = Math.floor((ms % 86400000) / 3600000)
@@ -394,7 +395,7 @@
         }
       }
       // For status 'done': the object is already stored in R2.
-      // We leave it as an orphan; the existing 7-day R2 lifecycle expiry reclaims it.
+      // We leave it as an orphan; the existing 14-day R2 lifecycle expiry reclaims it.
       // (Calling /api/delete here would wipe all sibling members under the same bundleId.)
     }
     files = files.filter(f => f.id !== id)
@@ -571,7 +572,7 @@
       <span class="dz-specs mono dim">
         <span>up to 45 files · 100 GB each</span>
         <span class="dz-dot">·</span>
-        <span>expires in 7 days</span>
+        <span>expires in {EXPIRY_DAYS} days</span>
       </span>
       <input
         bind:this={fileInput}
