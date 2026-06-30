@@ -505,7 +505,7 @@ export const GET: RequestHandler = async ({ params, platform }) => {
   - If `size ≤ 5GB`: hit `/api/presign-upload`, single `XMLHttpRequest` PUT, watch `xhr.upload.onprogress`.
   - If `size > 5GB`: hit `/api/presign-multipart`, slice file into parts, PUT each (up to 4 concurrent) using `XMLHttpRequest`, capture `ETag` from each response, then POST to `/api/complete-multipart`.
 - On abort/error after init, best-effort POST `/api/abort-multipart` so we don't leave orphans.
-- After success: show `downloadUrl` with copy button + "expires in 7 days" note.
+- After success: show `downloadUrl` with copy button + "expires in 14 days" note.
 - Sign-out link.
 
 ## R2 configuration
@@ -523,7 +523,7 @@ export const GET: RequestHandler = async ({ params, platform }) => {
    ```
    `ETag` must be in `ExposeHeaders` so the client can read it from each part response.
 3. **Lifecycle rules**:
-   - Delete objects 7 days after creation.
+   - Delete objects 14 days after creation.
    - Abort incomplete multipart uploads after 1 day (prevents orphan part billing).
    Configure via dashboard or `wrangler r2 bucket lifecycle add`.
 4. **R2 API token** with read/write scoped to this bucket only. Used for presigning + multipart admin calls.
@@ -594,7 +594,7 @@ export {};
 
 1. `pnpm create svelte@latest drop` → Skeleton, TypeScript, ESLint.
 2. `pnpm add -D @sveltejs/adapter-cloudflare` and configure `svelte.config.js`.
-3. Create R2 bucket; configure CORS + both lifecycle rules (7-day expiry, 1-day multipart abort).
+3. Create R2 bucket; configure CORS + both lifecycle rules (14-day expiry, 1-day multipart abort).
 4. Register GitHub OAuth App:
    - Homepage URL: `https://drop.yourdomain.com`
    - Callback URL: `https://drop.yourdomain.com/auth/callback`

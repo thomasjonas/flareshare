@@ -62,6 +62,30 @@ object's bytes through untouched, and finally writes the central directory (ZIP6
 when total > 4 GB, any member ≥ 4 GB, or > 65535 entries). No compression, no CRC
 recompute → CPU stays near zero, identical to the current single-file path.
 
+> **Implementation rule — member bytes must be piped natively, never pulled through JS.**
+> "Pipes the bytes through untouched" is a *hard* requirement, not a figure of speech. The
+> encoder builds only the small headers in JS; each member body is handed to the runtime
+> via `body.pipeTo(writable, { preventClose: true })`, so the runtime copies member bytes
+> internally at ~0 CPU — exactly like `new Response(r2.body)` on the single-file path.
+> Members are fetched lazily, one at a time in `order`, via a per-entry `open()` thunk so
+> only one R2 subrequest is ever in flight.
+>
+> Two distinct ways to get this wrong, **both of which have shipped and both of which cause
+> `exceededCpu` on large bundles** — CPU scales with archive size instead of staying flat:
+>
+> 1. **Reading member bodies chunk-by-chunk in JS** — a `ReadableStream`/async-generator
+>    `read()`→`enqueue`/`yield` loop. Every byte crosses the JS boundary. (The original
+>    encoder stacked *three* such layers.)
+> 2. **Piping into a plain `TransformStream`.** This is the subtle one: a standard
+>    `TransformStream` runs a JS transform callback for **every chunk even when the
+>    transform is the identity**, so `pipeTo` still surfaces every byte to JS. The
+>    pass-through MUST use Cloudflare's **`IdentityTransformStream`** (or
+>    **`FixedLengthStream`**, preferred — it also fixes the body length), which pass bytes
+>    through in the runtime with no per-chunk JS. `zip.ts` selects `FixedLengthStream` →
+>    `IdentityTransformStream` → `TransformStream` in that order; the plain
+>    `TransformStream` fallback exists only so the Node test suite runs (no Workers CPU
+>    limiter there) and must never be the path taken in production.
+
 Because CRC **and** every size are known upfront, the **total ZIP byte length is
 computable**, so the response sets **`Content-Length`** — giving the browser a real
 progress bar and ETA (which a CRC-computing streamer cannot).
@@ -125,7 +149,7 @@ Replaces fire-and-forget per-file upload with a composition tray (1 link per tra
 - **45-file cap** enforced in the tray (safe headroom under Free's 50 subrequests = 1
   manifest GET + 1 GET per member).
 - An **abandoned tray** leaves member objects with no manifest → invisible (no working
-  link) and swept by the existing **7-day R2 lifecycle expiry**. A download attempted
+  link) and swept by the existing **14-day R2 lifecycle expiry**. A download attempted
   before finalize → 404 / "still processing".
 
 ## Surfaces to change
@@ -160,7 +184,7 @@ Replaces fire-and-forget per-file upload with a composition tray (1 link per tra
 ## Accepted risks / limits
 
 - **No resume / range** on the zip — a dropped download restarts from zero. Acceptable for
-  7-day ephemeral shares.
+  14-day ephemeral shares.
 - **No mid-stream member verification** — if a member is missing after streaming has begun
   (headers + `Content-Length` already sent), the client receives a truncated zip. Rare for
   a finalized bundle, and a whole bundle expires together.
