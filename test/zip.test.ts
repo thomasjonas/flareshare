@@ -50,7 +50,7 @@ test('predictZipSize equals actual emitted byte length (small 3-file zip)', asyn
 		name,
 		size: bodies[i].length,
 		crc32: hexCrc(bodies[i]),
-		body: streamOf(bodies[i])
+		open: () => streamOf(bodies[i])
 	}));
 
 	const predicted = predictZipSize(entries.map((e) => ({ name: e.name, size: e.size })));
@@ -70,7 +70,7 @@ test('emitted zip round-trips through unzip with byte-identical members', async 
 		name,
 		size: bodies[i].length,
 		crc32: hexCrc(bodies[i]),
-		body: streamOf(bodies[i])
+		open: () => streamOf(bodies[i])
 	}));
 
 	const buf = await drain(zipStream(entries));
@@ -138,7 +138,7 @@ test('rejects bad input', () => {
 	assert.throws(() => predictZipSize([{ name: '', size: 1 }]), /name length/);
 	assert.throws(() => predictZipSize([{ name: 'x', size: -1 }]), /size/);
 	assert.throws(
-		() => zipStream([{ name: 'x', size: 0, crc32: 'zz', body: streamOf(new Uint8Array()) }]),
+		() => zipStream([{ name: 'x', size: 0, crc32: 'zz', open: () => streamOf(new Uint8Array()) }]),
 		/crc32/
 	);
 });

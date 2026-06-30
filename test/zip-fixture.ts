@@ -49,20 +49,22 @@ function patternMember(name: string, size: number, seed: number): ZipEntry {
 	}
 	const crcHex = (crc >>> 0).toString(16).padStart(8, '0');
 
-	let left = size;
-	const body = new ReadableStream<Uint8Array>({
-		pull(controller) {
-			if (left <= 0) {
-				controller.close();
-				return;
+	const open = () => {
+		let left = size;
+		return new ReadableStream<Uint8Array>({
+			pull(controller) {
+				if (left <= 0) {
+					controller.close();
+					return;
+				}
+				const n = Math.min(BLOCK, left);
+				controller.enqueue(n === BLOCK ? block : block.subarray(0, n));
+				left -= n;
 			}
-			const n = Math.min(BLOCK, left);
-			controller.enqueue(n === BLOCK ? block : block.subarray(0, n));
-			left -= n;
-		}
-	});
+		});
+	};
 
-	return { name, size, crc32: crcHex, body };
+	return { name, size, crc32: crcHex, open };
 }
 
 function smallMember(name: string, text: string): ZipEntry {
@@ -71,12 +73,13 @@ function smallMember(name: string, text: string): ZipEntry {
 		name,
 		size: bytes.length,
 		crc32: (crc32(bytes) >>> 0).toString(16).padStart(8, '0'),
-		body: new ReadableStream({
-			start(c) {
-				c.enqueue(bytes);
-				c.close();
-			}
-		})
+		open: () =>
+			new ReadableStream({
+				start(c) {
+					c.enqueue(bytes);
+					c.close();
+				}
+			})
 	};
 }
 

@@ -57,8 +57,15 @@ export interface ZipEntry {
 	size: number;
 	/** Precomputed CRC32 as 8-char hex (e.g. "1a2b3c4d") or a uint32 number. */
 	crc32: string | number;
-	/** Member bytes. Piped through verbatim; never read for any other purpose. */
-	body: ReadableStream<Uint8Array>;
+	/**
+	 * Opens the member's byte stream. Called lazily, one entry at a time in
+	 * order, immediately before the bytes are needed — so at most one source
+	 * fetch is in flight at once. The returned stream is `pipeTo`'d into the
+	 * archive's writable directly: the runtime copies its bytes natively, so
+	 * member bytes never cross the JS boundary (see docs/BUNDLES.md — the Worker
+	 * must never compute over file bytes).
+	 */
+	open: () => ReadableStream<Uint8Array> | Promise<ReadableStream<Uint8Array>>;
 }
 
 /** What `predictZipSize` needs — no body, no CRC. */
@@ -318,48 +325,50 @@ function endRecords(plan: Plan): Uint8Array {
 	return w.done();
 }
 
-function streamFromGenerator(gen: AsyncGenerator<Uint8Array>): ReadableStream<Uint8Array> {
-	return new ReadableStream<Uint8Array>({
-		async pull(controller) {
-			const { value, done } = await gen.next();
-			if (done) controller.close();
-			else controller.enqueue(value);
-		},
-		async cancel(reason) {
-			await gen.return(reason);
-		}
-	});
-}
-
 /**
  * Stream a STORE-mode ZIP of `entries`. Member bytes are piped through
  * untouched; the supplied `crc32` is injected into the headers. The emitted
  * length is exactly `predictZipSize(entries)`.
+ *
+ * Member bodies are `pipeTo`'d directly into the archive's writable rather than
+ * being read chunk-by-chunk in JS: this lets the runtime copy R2 bytes natively
+ * (≈0 CPU), matching the single-file passthrough path. Only the small ZIP
+ * headers — which we must build — pass through JS. Pulling member bytes through
+ * a JS generator/ReadableStream instead would make CPU scale with archive size
+ * and blow the CPU limit on large bundles.
  */
 export function zipStream(entries: ZipEntry[]): ReadableStream<Uint8Array> {
 	const plan = planLayout(entries, entries.map((e) => e.crc32));
+	const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
 
-	async function* generate(): AsyncGenerator<Uint8Array> {
-		for (let i = 0; i < entries.length; i++) {
-			const p = plan.entries[i];
-			yield localHeader(p);
+	void (async () => {
+		// `writer` holds the lock only while we write headers. We release it
+		// around each member so its body can pipe straight into `writable`.
+		let writer: WritableStreamDefaultWriter<Uint8Array> | null = writable.getWriter();
+		try {
+			for (let i = 0; i < entries.length; i++) {
+				await writer!.write(localHeader(plan.entries[i]));
+				writer!.releaseLock();
+				writer = null;
 
-			const reader = entries[i].body.getReader();
-			try {
-				while (true) {
-					const { value, done } = await reader.read();
-					if (done) break;
-					if (value && value.length > 0) yield value;
-				}
-			} finally {
-				reader.releaseLock();
+				const body = await entries[i].open();
+				// preventClose keeps `writable` open for the next member / the
+				// central directory; pipeTo releases its writable lock when done.
+				await body.pipeTo(writable, { preventClose: true });
+
+				writer = writable.getWriter();
 			}
-		}
-		for (const p of plan.entries) {
-			yield centralHeader(p);
-		}
-		yield endRecords(plan);
-	}
 
-	return streamFromGenerator(generate());
+			for (const p of plan.entries) await writer!.write(centralHeader(p));
+			await writer!.write(endRecords(plan));
+			await writer!.close();
+		} catch (err) {
+			// If we hold the lock, abort through the writer; otherwise pipeTo has
+			// already released it (and, on a source error, aborted `writable`).
+			if (writer) await writer.abort(err).catch(() => {});
+			else await writable.abort(err).catch(() => {});
+		}
+	})();
+
+	return readable;
 }

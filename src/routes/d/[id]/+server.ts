@@ -15,48 +15,25 @@ const SECURITY_HEADERS = {
 } as const;
 
 /**
- * Return a ReadableStream that lazily fetches the R2 object on first pull.
- * "Lazy" here means the fetch is deferred until the stream consumer calls
- * read() — the zipStream generator reads entries sequentially, so at most
- * one subrequest is in flight at a time.
+ * Open a member's R2 byte stream. Invoked lazily by zipStream, one entry at a
+ * time in order, so at most one subrequest is in flight. The returned stream is
+ * piped through untouched, so member bytes never cross the JS boundary.
+ *
+ * On a failed GET this throws. If the failure happens before any bytes are
+ * emitted the error propagates through zipStream before headers are sent; if it
+ * happens mid-stream the client gets a truncated zip (accepted risk: see
+ * docs/BUNDLES.md "Accepted risks").
  */
-function makeLazyR2Stream(
+async function openR2Stream(
 	client: AwsClient,
 	env: App.Platform['env'],
 	key: string
-): ReadableStream<Uint8Array> {
-	let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
-	let fetchStarted = false;
-
-	return new ReadableStream<Uint8Array>({
-		async pull(controller) {
-			if (!fetchStarted) {
-				fetchStarted = true;
-				const res = await getObject(client, env, key);
-				if (!res.ok || !res.body) {
-					// Headers are not yet sent — this error propagates through zipStream.
-					// If headers *were* already sent the client gets a truncated zip
-					// (accepted risk: see docs/BUNDLES.md "Accepted risks").
-					controller.error(new Error(`R2 GET failed for key "${key}": ${res.status}`));
-					return;
-				}
-				reader = res.body.getReader();
-			}
-
-			if (!reader) return;
-
-			const { value, done } = await reader.read();
-			if (done) {
-				reader.releaseLock();
-				controller.close();
-			} else if (value) {
-				controller.enqueue(value);
-			}
-		},
-		cancel() {
-			reader?.cancel();
-		}
-	});
+): Promise<ReadableStream<Uint8Array>> {
+	const res = await getObject(client, env, key);
+	if (!res.ok || !res.body) {
+		throw new Error(`R2 GET failed for key "${key}": ${res.status}`);
+	}
+	return res.body;
 }
 
 export const GET: RequestHandler = async ({ params, platform }) => {
@@ -128,7 +105,7 @@ export const GET: RequestHandler = async ({ params, platform }) => {
 			name: member.filename,
 			size: member.size, // manifest size — single source of truth
 			crc32: member.crc32,
-			body: makeLazyR2Stream(client, env, member.key)
+			open: () => openR2Stream(client, env, member.key)
 		}));
 
 		const zipName = manifest.title || `flareshare-${id}.zip`;
