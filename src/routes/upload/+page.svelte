@@ -2,6 +2,7 @@
   import { untrack } from 'svelte'
   import { nanoid } from 'nanoid'
   import { crc32Stream, crc32Combine } from '$lib/crc32'
+  import IconXButton from '$lib/components/IconXButton.svelte'
   import type { PageData } from './$types'
   import type { TransferRow } from './+page.server'
 
@@ -417,7 +418,6 @@
   }
 
   async function deleteUpload(item: RecentItem) {
-    if (!confirm('Delete this transfer? The download link will stop working.')) return
     const res = await fetch('/api/delete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -638,23 +638,13 @@
                   {:else if e.status === 'error'}
                     <span class="status-tag err">{statusLabel}</span>
                   {/if}
-                  <button
+                  <IconXButton
                     class="row-x"
+                    label="Remove"
+                    size={22}
+                    iconSize={11}
                     onclick={() => removeEntry(e.id)}
-                    aria-label="Remove"
-                  >
-                    <svg
-                      width="11"
-                      height="11"
-                      viewBox="0 0 13 13"
-                    >
-                      <path
-                        d="M3 3l7 7M10 3l-7 7"
-                        stroke="currentColor"
-                        stroke-width="1.2"
-                      />
-                    </svg>
-                  </button>
+                  />
                 </div>
               </div>
 
@@ -859,23 +849,14 @@
                 </svg>
                 {expiresIn(r.uploaded)}
               </span>
-              <button
+              <IconXButton
                 class="rec-del mono"
+                label="Delete"
+                size={22}
+                iconSize={10}
+                confirmMessage="Delete this transfer? The download link will stop working."
                 onclick={() => deleteUpload(r)}
-                aria-label="Delete"
-              >
-                <svg
-                  width="10"
-                  height="10"
-                  viewBox="0 0 13 13"
-                >
-                  <path
-                    d="M3 3l7 7M10 3l-7 7"
-                    stroke="currentColor"
-                    stroke-width="1.2"
-                  />
-                </svg>
-              </button>
+              />
             </li>
           {/each}
         </ul>
