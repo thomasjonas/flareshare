@@ -2,10 +2,19 @@
 
 A minimal, single-user file drop built on SvelteKit and Cloudflare. Upload files up to 100 GB, share a link, files auto-expire after 14 days. GitHub OAuth restricts uploads to one account; downloads are public capability URLs — no sign-in required.
 
+Multiple files can be combined into a single bundle, sharing one link. The recipient downloads one streaming ZIP.
+
+## Why
+
+I used WeTransfer for years, but it's gotten worse: shorter retention windows, lower free file size limits, and more nagging upsells. The alternatives I looked at weren't much better, with bad UX like verification emails.
+
+I only need this for myself: drop a file, get a link, send it, let it expire. So I built the smallest thing that does that, with no accounts for recipients, no artificial limits, storage cheap enough to not think about, hosted on infrastructure I already trust.
+
 ## Features
 
 - Drag-and-drop or file-picker upload
 - Files up to 5 GB via a single presigned PUT; up to 100 GB via multipart (64 MB parts, 4 concurrent)
+- Multi-file bundles: up to 45 files per transfer, shared as one link, downloaded as a single streaming ZIP (no server-side compute over file bytes, so it scales the same as single-file downloads)
 - Direct browser-to-R2 uploads — file bytes never pass through the Worker
 - Public download links with no authentication
 - Recent uploads list with copy-link and delete
@@ -20,7 +29,7 @@ A minimal, single-user file drop built on SvelteKit and Cloudflare. Upload files
 - [`aws4fetch`](https://github.com/mhart/aws4fetch) for SigV4 presigned URLs (Worker-native, no AWS SDK)
 - [GitHub OAuth](https://docs.github.com/en/apps/oauth-apps) for single-user authentication
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a detailed design walkthrough.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a detailed design walkthrough, and [docs/BUNDLES.md](docs/BUNDLES.md) for how multi-file bundles are streamed as ZIPs on Cloudflare's Free plan.
 
 ## Self-hosting
 
@@ -40,7 +49,7 @@ npm install
 
 ### 2. Create an R2 bucket
 
-In the Cloudflare dashboard, create a bucket (e.g. `transfer`) and add a lifecycle rule: **expire objects after 14 days**.
+In the Cloudflare dashboard, create a bucket (any name — you'll set it as `R2_BUCKET` below) and add a lifecycle rule: **expire objects after 14 days**.
 
 Generate an R2 API token with **Object Read & Write** for that bucket.
 
@@ -77,6 +86,13 @@ npm run dev
 ```
 
 The dev server runs at `http://localhost:5173`. Set the GitHub OAuth callback URL to `http://localhost:5173/auth/callback` for local testing (you can use a separate OAuth App or temporarily update the callback URL).
+
+## Limitations
+
+- Single-user only — one GitHub account can upload; there's no multi-tenant support
+- Bundles are capped at 45 files (Cloudflare Free plan's 50-subrequest limit); individual file/bundle size is not capped beyond the 100 GB multipart ceiling
+- No resumable or ranged downloads — an interrupted download restarts from zero
+- No database — recent-uploads listing and expiry both rely on R2 object listing and lifecycle rules, so there's no history once an object expires
 
 ## Cost
 
