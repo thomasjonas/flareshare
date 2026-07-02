@@ -4,6 +4,8 @@ A minimal, single-user file drop built on SvelteKit and Cloudflare. Upload files
 
 Multiple files can be combined into a single bundle, sharing one link. The recipient downloads one streaming ZIP.
 
+Most of this project was built with [Claude Code](https://claude.com/claude-code).
+
 ## Why
 
 I used WeTransfer for years, but it's gotten worse: shorter retention windows, lower free file size limits, and more nagging upsells. The alternatives I looked at weren't much better, with bad UX like verification emails.
