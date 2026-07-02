@@ -15,6 +15,24 @@ const SECURITY_HEADERS = {
 } as const;
 
 /**
+ * Proxy an internal fetch to a real Svelte page and return its HTML at the
+ * caller's original URL with the real error status — see
+ * docs/adr/0001-friendly-page-via-internal-proxy.md for why this can't be a
+ * redirect or content-negotiated +page.svelte.
+ */
+async function unavailableResponse(
+	fetch: typeof globalThis.fetch,
+	page: '/gone' | '/try-again',
+	status: number
+): Promise<Response> {
+	const res = await fetch(page);
+	return new Response(await res.text(), {
+		status,
+		headers: { 'Content-Type': 'text/html; charset=utf-8', ...SECURITY_HEADERS }
+	});
+}
+
+/**
  * Open a member's R2 byte stream. Invoked lazily by zipStream, one entry at a
  * time in order, so at most one subrequest is in flight. The returned stream is
  * piped through untouched, so member bytes never cross the JS boundary.
@@ -36,11 +54,11 @@ async function openR2Stream(
 	return res.body;
 }
 
-export const GET: RequestHandler = async ({ params, platform }) => {
+export const GET: RequestHandler = async ({ params, platform, fetch }) => {
 	const { id } = params;
 
 	if (!ID_RE.test(id)) {
-		return new Response('Not found', { status: 404 });
+		return unavailableResponse(fetch, '/gone', 404);
 	}
 
 	const env = platform!.env;
@@ -61,15 +79,15 @@ export const GET: RequestHandler = async ({ params, platform }) => {
 				parsed === null ||
 				!Array.isArray((parsed as Record<string, unknown>).files)
 			) {
-				return new Response('Not found', { status: 404 });
+				return unavailableResponse(fetch, '/gone', 404);
 			}
 			manifest = parsed as Manifest;
 		} catch {
-			return new Response('Not found', { status: 404 });
+			return unavailableResponse(fetch, '/gone', 404);
 		}
 
 		if (manifest.files.length === 0) {
-			return new Response('Not found', { status: 404 });
+			return unavailableResponse(fetch, '/gone', 404);
 		}
 
 		// Sort by order ascending — MUST be the same for both predictZipSize and
@@ -81,7 +99,9 @@ export const GET: RequestHandler = async ({ params, platform }) => {
 			const member = files[0];
 			const memberRes = await getObject(client, env, member.key);
 			if (!memberRes.ok) {
-				return new Response('Not found', { status: 404 });
+				return memberRes.status === 404
+					? unavailableResponse(fetch, '/gone', 404)
+					: unavailableResponse(fetch, '/try-again', 503);
 			}
 			return new Response(memberRes.body, {
 				headers: {
@@ -122,10 +142,10 @@ export const GET: RequestHandler = async ({ params, platform }) => {
 	}
 
 	// ── 2. Manifest absent — legacy fallback (verbatim existing logic) ───────
-	// Only reached when manifest.json returns 404. Any other R2 error → 404
-	// to avoid leaking internals.
+	// Only reached when manifest.json returns 404. Any other R2 error is
+	// transient (not "gone") → /try-again.
 	if (manifestRes.status !== 404) {
-		return new Response('Not found', { status: 404 });
+		return unavailableResponse(fetch, '/try-again', 503);
 	}
 
 	// List objects under the {id}/ prefix.  Filter to DIRECT children only
@@ -136,7 +156,7 @@ export const GET: RequestHandler = async ({ params, platform }) => {
 	const legacyObj = findLegacyObject(id, prefixObjects);
 
 	if (!legacyObj) {
-		return new Response('Not found', { status: 404 });
+		return unavailableResponse(fetch, '/gone', 404);
 	}
 
 	// Stream the single legacy object — this is the pre-bundle code path, kept
@@ -148,7 +168,9 @@ export const GET: RequestHandler = async ({ params, platform }) => {
 		{ method: 'GET' }
 	);
 	if (!fileRes.ok) {
-		return new Response('Not found', { status: 404 });
+		return fileRes.status === 404
+			? unavailableResponse(fetch, '/gone', 404)
+			: unavailableResponse(fetch, '/try-again', 503);
 	}
 
 	return new Response(fileRes.body, {
