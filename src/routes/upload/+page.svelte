@@ -3,9 +3,7 @@
   import { nanoid } from 'nanoid'
   import TopBar from '$lib/components/TopBar.svelte'
   import SiteFooter from '$lib/components/SiteFooter.svelte'
-  import DropZone from '$lib/components/DropZone.svelte'
-  import UploadTray from '$lib/components/UploadTray.svelte'
-  import TransferLink from '$lib/components/TransferLink.svelte'
+  import UploadWell from '$lib/components/UploadWell.svelte'
   import RecentTransfers from '$lib/components/RecentTransfers.svelte'
   import {
     createUploader,
@@ -15,6 +13,7 @@
     type FileEntry,
   } from '$lib/upload'
   import { createReconciler } from '$lib/reconcile'
+  import { buildOptimisticRow } from '$lib/well'
   import type { PageData } from './$types'
   import type { TransferRow } from './+page.server'
 
@@ -31,9 +30,10 @@
 
   // --- Reconcile state ---
   // The link is a pure consequence of the well settling — never a manual
-  // commit. `sealed`/`downloadUrl` reflect the last reconcile write that
-  // actually completed; see docs/adr/0002-sealed-manifest-lifecycle.md.
-  let sealed = $state(false)
+  // commit. `downloadUrl` reflects the last reconcile write that actually
+  // completed; see docs/adr/0002-sealed-manifest-lifecycle.md. The well
+  // itself derives empty/working/sealed display purely from `files` and
+  // whether `downloadUrl` is set (see $lib/well.ts computeWellDisplay).
   let downloadUrl = $state('')
   let reconcileError = $state('')
 
@@ -87,7 +87,6 @@
       reconcileError = ''
       const { downloadUrl: url } = await res.json()
       downloadUrl = url
-      sealed = isSealed
     },
     del: async bId => {
       await fetch('/api/delete', {
@@ -103,7 +102,6 @@
         title = ''
       }
       downloadUrl = ''
-      sealed = false
     },
   })
 
@@ -165,15 +163,21 @@
     reconciler.schedule()
   }
 
-  /** "Start new transfer": the current transfer stays live/shared as-is; only
-   * the local tray resets so the next add begins a fresh bundle. */
+  /** "Start new transfer": the current transfer stays live/shared as-is;
+   * only the local well resets so the next add begins a fresh bundle. The
+   * just-sealed transfer is optimistically prepended to Recent so it
+   * doesn't momentarily vanish from the page — a later reload reconciles
+   * against the SSR-loaded list by id, so it never appears twice. */
   function startNewTransfer() {
+    if (bundleId && downloadUrl) {
+      const optimistic = buildOptimisticRow({ bundleId, title, files, downloadUrl })
+      recentUploads = [optimistic, ...recentUploads.filter(u => u.id !== optimistic.id)]
+    }
     files = []
     bundleId = null
     nextOrder = 0
     title = ''
     downloadUrl = ''
-    sealed = false
   }
 
   // Renaming (title change) also reconciles — debounced, same as file
@@ -204,15 +208,15 @@
   <TopBar />
 
   <main class="view view-upload">
-    <DropZone onFiles={addFiles} />
-
-    {#if files.length > 0}
-      <UploadTray {files} bind:title error={reconcileError} onRemove={removeEntry} />
-    {/if}
-
-    {#if sealed && downloadUrl}
-      <TransferLink url={downloadUrl} onDismiss={startNewTransfer} />
-    {/if}
+    <UploadWell
+      {files}
+      bind:title
+      {downloadUrl}
+      error={reconcileError}
+      onFiles={addFiles}
+      onRemove={removeEntry}
+      onStartNew={startNewTransfer}
+    />
 
     <RecentTransfers uploads={recentUploads} onDelete={deleteUpload} />
   </main>
