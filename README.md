@@ -23,6 +23,12 @@ I only need this for myself: drop a file, get a link, send it, let it expire. So
 - 14-day auto-expiry via R2 lifecycle rules
 - GitHub OAuth gating — only your account can upload
 
+## Screenshots
+
+|                                       |                                       |
+| ------------------------------------- | ------------------------------------- |
+| ![Empty upload page](docs/images/upload-empty.png) | ![Active transfer with progress](docs/images/upload-active.png) |
+
 ## Stack
 
 - [SvelteKit](https://kit.svelte.dev) (Svelte 5) with `@sveltejs/adapter-cloudflare`
