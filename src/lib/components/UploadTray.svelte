@@ -7,17 +7,13 @@
   let {
     files,
     title = $bindable(),
-    finalizing,
-    finalizeError,
+    error,
     onRemove,
-    onFinalize,
   }: {
     files: FileEntry[]
     title: string
-    finalizing: boolean
-    finalizeError: string
+    error: string
     onRemove: (id: string) => void
-    onFinalize: () => void
   } = $props()
 
   let activeCount = $derived(
@@ -26,8 +22,6 @@
   let totalBytes = $derived(files.reduce((s, e) => s + e.file.size, 0))
   let sentBytes = $derived(files.reduce((s, e) => s + e.uploadedBytes, 0))
   let hasErrors = $derived(files.some(e => e.status === 'error'))
-  let allDone = $derived(files.length > 0 && files.every(e => e.status === 'done'))
-  let canFinalize = $derived(allDone && !finalizing)
 </script>
 
 <section class="files">
@@ -56,27 +50,15 @@
     />
     <div class="tray-actions">
       {#if hasErrors}
-        <span class="tray-hint mono err-text">Remove failed files to create a link.</span>
+        <span class="tray-hint mono err-text">Remove failed files to seal the transfer.</span>
       {:else if activeCount > 0}
         <span class="tray-hint mono dim">Waiting for {activeCount} upload{activeCount === 1 ? '' : 's'}…</span>
+      {:else}
+        <span class="tray-hint mono dim">Link ready — sealing automatically.</span>
       {/if}
-      <button
-        class="create-link-btn mono"
-        onclick={onFinalize}
-        disabled={!canFinalize || hasErrors}
-        aria-label="Create transfer link"
-      >
-        {#if finalizing}
-          Creating link…
-        {:else if activeCount > 0}
-          Uploading…
-        {:else}
-          Create link
-        {/if}
-      </button>
     </div>
-    {#if finalizeError}
-      <div class="tray-error mono">! {finalizeError}</div>
+    {#if error}
+      <div class="tray-error mono">! {error}</div>
     {/if}
   </div>
 </section>
@@ -131,30 +113,6 @@
     letter-spacing: 0.01em;
     color: var(--muted);
     flex: 1;
-  }
-  .create-link-btn {
-    font-size: 12.5px;
-    letter-spacing: 0.03em;
-    padding: 9px 20px;
-    border: 1px solid var(--ink);
-    background: var(--ink);
-    color: var(--bg);
-    cursor: pointer;
-    transition:
-      background 0.12s,
-      color 0.12s,
-      border-color 0.12s;
-    flex-shrink: 0;
-  }
-  .create-link-btn:hover:not(:disabled) {
-    background: var(--bg);
-    color: var(--ink);
-  }
-  .create-link-btn:disabled {
-    border-color: var(--hairline);
-    background: var(--surface);
-    color: var(--muted-2);
-    cursor: not-allowed;
   }
   .tray-error {
     font-size: 11.5px;

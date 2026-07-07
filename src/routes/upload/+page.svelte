@@ -14,6 +14,7 @@
     TOTAL_MAX,
     type FileEntry,
   } from '$lib/upload'
+  import { createReconciler } from '$lib/reconcile'
   import type { PageData } from './$types'
   import type { TransferRow } from './+page.server'
 
@@ -28,16 +29,82 @@
   let title = $state('')
   let recentUploads: RecentItem[] = $state(untrack(() => data.uploads ?? []))
 
-  // --- Finalize state ---
-  let finalizing = $state(false)
-  let finalizeError = $state('')
-  let finalizedUrl = $state('')
+  // --- Reconcile state ---
+  // The link is a pure consequence of the well settling — never a manual
+  // commit. `sealed`/`downloadUrl` reflect the last reconcile write that
+  // actually completed; see docs/adr/0002-sealed-manifest-lifecycle.md.
+  let sealed = $state(false)
+  let downloadUrl = $state('')
+  let reconcileError = $state('')
 
   const uploader = createUploader({
     patch: (id, patch) => {
       files = files.map(f => (f.id === id ? { ...f, ...patch } : f))
+      reconciler.schedule()
     },
     getEntry: id => files.find(f => f.id === id),
+  })
+
+  const reconciler = createReconciler({
+    getState: () => ({ bundleId, title, files }),
+    write: async (bId, t, members, isSealed) => {
+      const filesSorted = members.slice().sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+      const missingMeta = filesSorted.find(
+        e => !e.key || e.crc32 === undefined || e.order === undefined,
+      )
+      if (missingMeta) {
+        reconcileError = `"${missingMeta.file.name}" is missing upload metadata — try removing and re-adding it.`
+        return
+      }
+      const filePayload = filesSorted.map(e => ({
+        key: e.key!,
+        filename: e.file.name,
+        size: e.file.size,
+        crc32: e.crc32!,
+        order: e.order!,
+      }))
+
+      const res = await fetch('/api/finalize-bundle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: bId,
+          title: t.trim() || undefined,
+          sealed: isSealed,
+          files: filePayload,
+        }),
+      })
+
+      if (res.status === 401) {
+        reconcileError = 'Session expired — please sign in again.'
+        return
+      }
+      if (!res.ok) {
+        reconcileError = await res.text()
+        return
+      }
+
+      reconcileError = ''
+      const { downloadUrl: url } = await res.json()
+      downloadUrl = url
+      sealed = isSealed
+    },
+    del: async bId => {
+      await fetch('/api/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: bId }),
+      })
+      // Only clear bundle identity once the delete has actually completed —
+      // see the comment in addFiles for the race this avoids.
+      if (bundleId === bId) {
+        bundleId = null
+        nextOrder = 0
+        title = ''
+      }
+      downloadUrl = ''
+      sealed = false
+    },
   })
 
   function addFiles(incoming: File[]) {
@@ -56,13 +123,17 @@
       filesToAdd = incoming.slice(0, canAdd)
     }
 
-    // Mint a fresh bundleId when the first file is added to an empty tray.
-    // The same bundleId is reused for every subsequent file in the same tray.
-    if (currentCount === 0) {
+    // Mint a fresh bundleId only when there is no bundle currently in play.
+    // Deliberately keyed on `bundleId`, not `files.length`: emptying the well
+    // schedules a debounced delete of the *old* bundleId (see reconciler's
+    // `del`), which only clears `bundleId` once that delete actually
+    // completes. If the sender re-adds a file before that fires, we want to
+    // keep uploading into the same (soon-to-not-be-deleted) bundle rather
+    // than mint a second one and race the pending delete against it.
+    if (bundleId === null) {
       bundleId = nanoid(10)
-      nextOrder = 0
     }
-    const bId = bundleId!
+    const bId = bundleId
 
     const valid: FileEntry[] = []
     let orderIdx = nextOrder
@@ -75,6 +146,7 @@
     }
     nextOrder = orderIdx
     files = [...files, ...valid]
+    reconciler.schedule()
     valid.forEach(e => uploader.upload(e, bId))
   }
 
@@ -87,73 +159,30 @@
       // /api/delete here would wipe all sibling members under the same bundleId.)
     }
     files = files.filter(f => f.id !== id)
-    // Reset bundle state when the tray becomes empty so the next add mints a fresh bundleId
-    if (files.length === 0) {
-      bundleId = null
-      nextOrder = 0
-      title = ''
-    }
+    // Bundle/title reset (when the well ends up empty) happens inside the
+    // reconciler's `del` callback, once the delete actually completes — not
+    // here. See the comment in addFiles for why.
+    reconciler.schedule()
   }
 
-  async function finalizeBundle() {
-    const allDone = files.length > 0 && files.every(e => e.status === 'done')
-    if (!allDone || finalizing || !bundleId) return
-
-    // Check every entry has the required metadata fields
-    const missingMeta = files.find(
-      e => !e.key || e.crc32 === undefined || e.order === undefined,
-    )
-    if (missingMeta) {
-      finalizeError = `"${missingMeta.file.name}" is missing upload metadata — try removing and re-adding it.`
-      return
-    }
-
-    finalizing = true
-    finalizeError = ''
-
-    const filesSorted = files.slice().sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
-    const filePayload = filesSorted.map(e => ({
-      key: e.key!,
-      filename: e.file.name,
-      size: e.file.size,
-      crc32: e.crc32!,
-      order: e.order!,
-    }))
-
-    try {
-      const res = await fetch('/api/finalize-bundle', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          id: bundleId,
-          title: title.trim() || undefined,
-          files: filePayload,
-        }),
-      })
-
-      if (res.status === 401) {
-        finalizeError = 'Session expired — please sign in again to create a link.'
-        return
-      }
-      if (!res.ok) {
-        finalizeError = await res.text()
-        return
-      }
-
-      const { downloadUrl } = await res.json()
-      finalizedUrl = downloadUrl
-
-      // Reset the tray so the next add starts a fresh transfer
-      files = []
-      bundleId = null
-      nextOrder = 0
-      title = ''
-    } catch (err) {
-      finalizeError = err instanceof Error ? err.message : 'Unknown error'
-    } finally {
-      finalizing = false
-    }
+  /** "Start new transfer": the current transfer stays live/shared as-is; only
+   * the local tray resets so the next add begins a fresh bundle. */
+  function startNewTransfer() {
+    files = []
+    bundleId = null
+    nextOrder = 0
+    title = ''
+    downloadUrl = ''
+    sealed = false
   }
+
+  // Renaming (title change) also reconciles — debounced, same as file
+  // changes — so a sealed manifest's title stays current without unsealing
+  // (sealed depends only on file status, never on title).
+  $effect(() => {
+    title
+    reconciler.schedule()
+  })
 
   async function deleteUpload(item: RecentItem) {
     const res = await fetch('/api/delete', {
@@ -178,18 +207,11 @@
     <DropZone onFiles={addFiles} />
 
     {#if files.length > 0}
-      <UploadTray
-        {files}
-        bind:title
-        {finalizing}
-        {finalizeError}
-        onRemove={removeEntry}
-        onFinalize={finalizeBundle}
-      />
+      <UploadTray {files} bind:title error={reconcileError} onRemove={removeEntry} />
     {/if}
 
-    {#if finalizedUrl}
-      <TransferLink url={finalizedUrl} onDismiss={() => (finalizedUrl = '')} />
+    {#if sealed && downloadUrl}
+      <TransferLink url={downloadUrl} onDismiss={startNewTransfer} />
     {/if}
 
     <RecentTransfers uploads={recentUploads} onDelete={deleteUpload} />
