@@ -22,7 +22,7 @@ const SECURITY_HEADERS = {
  */
 async function unavailableResponse(
 	fetch: typeof globalThis.fetch,
-	page: '/gone' | '/try-again',
+	page: '/gone' | '/try-again' | '/in-progress',
 	status: number
 ): Promise<Response> {
 	const res = await fetch(page);
@@ -84,6 +84,12 @@ export const GET: RequestHandler = async ({ params, platform, fetch }) => {
 			manifest = parsed as Manifest;
 		} catch {
 			return unavailableResponse(fetch, '/gone', 404);
+		}
+
+		// Unsealed = sender still mid-edit. Missing `sealed` is treated as
+		// sealed for back-compat — see docs/adr/0002-sealed-manifest-lifecycle.md.
+		if (manifest.sealed === false) {
+			return unavailableResponse(fetch, '/in-progress', 200);
 		}
 
 		if (manifest.files.length === 0) {

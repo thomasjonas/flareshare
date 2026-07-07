@@ -6,7 +6,7 @@
 
 import type { Manifest } from '$lib/server/manifest';
 
-export type DispatchKind = 'zip' | 'single' | 'legacy' | 'not-found';
+export type DispatchKind = 'zip' | 'single' | 'legacy' | 'not-found' | 'in-progress';
 
 /**
  * Determine how /d/[id] should respond given the outcome of the manifest
@@ -24,6 +24,10 @@ export function chooseDispatch(
 	id: string
 ): DispatchKind {
 	if (manifestStatus === 200 && manifest !== null) {
+		// Missing `sealed` is treated as sealed — back-compat for manifests
+		// written before this field existed (see ADR 0002).
+		if (manifest.sealed === false) return 'in-progress';
+
 		const count = manifest.files.length;
 		if (count === 0) return 'not-found';
 		if (count === 1) return 'single';

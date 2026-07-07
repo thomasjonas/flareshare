@@ -297,6 +297,32 @@ test('title that is a number is rejected', () => {
 });
 
 // ---------------------------------------------------------------------------
+// sealed handling
+// ---------------------------------------------------------------------------
+
+test('sealed omitted from manifest when not provided', () => {
+	const manifest = buildManifest(VALID_ID, makeBody());
+	assert.ok(!('sealed' in manifest));
+});
+
+test('sealed: true is persisted', () => {
+	const manifest = buildManifest(VALID_ID, makeBody(undefined, { sealed: true }));
+	assert.equal(manifest.sealed, true);
+});
+
+test('sealed: false is persisted', () => {
+	const manifest = buildManifest(VALID_ID, makeBody(undefined, { sealed: false }));
+	assert.equal(manifest.sealed, false);
+});
+
+test('sealed that is not a boolean is rejected', () => {
+	assert.throws(
+		() => buildManifest(VALID_ID, makeBody(undefined, { sealed: 'true' })),
+		/sealed/
+	);
+});
+
+// ---------------------------------------------------------------------------
 // Empty files array
 // ---------------------------------------------------------------------------
 

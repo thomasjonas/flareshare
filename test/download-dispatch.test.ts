@@ -121,3 +121,26 @@ test('chooseDispatch: manifest absent, no objects → not-found', () => {
 test('chooseDispatch: unexpected R2 status (5xx) → not-found', () => {
 	assert.equal(chooseDispatch(500, null, noObjects, ID), 'not-found');
 });
+
+// ---------------------------------------------------------------------------
+// chooseDispatch: sealed lifecycle
+// ---------------------------------------------------------------------------
+
+test('chooseDispatch: sealed:true manifest → downloads as normal (zip)', () => {
+	const m = { ...manifest(3), sealed: true };
+	assert.equal(chooseDispatch(200, m, noObjects, ID), 'zip');
+});
+
+test('chooseDispatch: sealed:false manifest → in-progress', () => {
+	const m = { ...manifest(3), sealed: false };
+	assert.equal(chooseDispatch(200, m, noObjects, ID), 'in-progress');
+});
+
+test('chooseDispatch: sealed field absent (legacy manifest) → downloads as normal', () => {
+	assert.equal(chooseDispatch(200, manifest(1), noObjects, ID), 'single');
+});
+
+test('chooseDispatch: no manifest at all (pre-manifest legacy era) → unaffected by sealed logic', () => {
+	const objects = [{ key: `${ID}/file.pdf` }];
+	assert.equal(chooseDispatch(404, null, objects, ID), 'legacy');
+});

@@ -21,6 +21,12 @@ export interface ManifestFile {
 export interface Manifest {
 	title?: string;
 	files: ManifestFile[];
+	/**
+	 * Lifecycle state: sealed (settled, downloadable) vs unsealed (mid-edit,
+	 * shows /in-progress). Absent is treated as sealed — see
+	 * docs/adr/0002-sealed-manifest-lifecycle.md for back-compat rationale.
+	 */
+	sealed?: boolean;
 }
 
 const CRC32_RE = /^[0-9a-fA-F]{1,8}$/;
@@ -54,7 +60,10 @@ export function buildManifest(id: string, body: unknown): Manifest {
 		throw new Error('Request body must be a JSON object');
 	}
 
-	const { title: rawTitle, files: rawFiles } = body as Record<string, unknown>;
+	const { title: rawTitle, files: rawFiles, sealed: rawSealed } = body as Record<
+		string,
+		unknown
+	>;
 
 	// --- files array ---
 	if (!Array.isArray(rawFiles) || rawFiles.length === 0) {
@@ -141,6 +150,14 @@ export function buildManifest(id: string, body: unknown): Manifest {
 		if (title.length > 0) {
 			manifest.title = title;
 		}
+	}
+
+	// --- optional sealed ---
+	if (rawSealed !== undefined) {
+		if (typeof rawSealed !== 'boolean') {
+			throw new Error('sealed: must be a boolean when present');
+		}
+		manifest.sealed = rawSealed;
 	}
 
 	return manifest;

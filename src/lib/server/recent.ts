@@ -74,6 +74,12 @@ export function groupTransfers(
 				// Manifest GET failed or unreadable — treat as invisible.
 				continue;
 			}
+			if (manifest.sealed === false) {
+				// Unsealed = sender still mid-edit — omit from Recent (same
+				// treatment as a failed manifest fetch). Absent field means
+				// sealed (back-compat), so it still appears normally.
+				continue;
+			}
 
 			const members = objs.filter((o) => o.key !== manifestKey);
 			const totalSize = members.reduce((sum, o) => sum + o.size, 0);

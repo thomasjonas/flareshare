@@ -96,6 +96,47 @@ test('bundle: manifest not in map → row excluded', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Bundle: sealed lifecycle
+// ---------------------------------------------------------------------------
+
+test('bundle: sealed:false → row excluded (in-progress, not yet ready)', () => {
+	const objects: S3Object[] = [
+		obj(`${ID}/manifest.json`, 100),
+		obj(`${ID}/fid1/file1.txt`, 500)
+	];
+	const m = { ...manifest('Draft', 1), sealed: false };
+	const manifests = new Map<string, Manifest | null>([[ID, m]]);
+
+	const rows = groupTransfers(objects, manifests, ORIGIN);
+	assert.equal(rows.length, 0);
+});
+
+test('bundle: sealed:true → row included as normal', () => {
+	const objects: S3Object[] = [
+		obj(`${ID}/manifest.json`, 100),
+		obj(`${ID}/fid1/file1.txt`, 500)
+	];
+	const m = { ...manifest('Ready', 1), sealed: true };
+	const manifests = new Map<string, Manifest | null>([[ID, m]]);
+
+	const rows = groupTransfers(objects, manifests, ORIGIN);
+	assert.equal(rows.length, 1);
+	assert.equal(rows[0].title, 'Ready');
+});
+
+test('bundle: sealed field absent (legacy manifest) → row included as normal (back-compat)', () => {
+	const objects: S3Object[] = [
+		obj(`${ID}/manifest.json`, 100),
+		obj(`${ID}/fid1/file1.txt`, 500)
+	];
+	const manifests = new Map<string, Manifest | null>([[ID, manifest('Legacy', 1)]]);
+
+	const rows = groupTransfers(objects, manifests, ORIGIN);
+	assert.equal(rows.length, 1);
+	assert.equal(rows[0].title, 'Legacy');
+});
+
+// ---------------------------------------------------------------------------
 // Legacy single: 2-segment key, no manifest
 // ---------------------------------------------------------------------------
 
