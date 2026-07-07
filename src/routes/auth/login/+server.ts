@@ -1,11 +1,12 @@
 import type { RequestHandler } from './$types';
+import { dev } from '$app/environment';
 
 export const GET: RequestHandler = async ({ cookies, platform, url }) => {
 	const state = crypto.randomUUID();
 	cookies.set('oauth_state', state, {
 		path: '/',
 		httpOnly: true,
-		secure: true,
+		secure: !dev,
 		sameSite: 'lax',
 		maxAge: 600
 	});
